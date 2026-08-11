@@ -13,6 +13,10 @@ pub struct SigInfo {
     pub si_pid: i32,
     pub si_uid: u32,
     pub si_value: i32,
+    /// Faulting instruction or memory address for kernel-generated synchronous
+    /// SIGILL/SIGFPE/SIGSEGV/SIGBUS/SIGTRAP records. `None` selects the
+    /// kill/rt payload in Linux's siginfo union.
+    pub si_addr: Option<usize>,
 }
 
 /// 信号编号定义（使用 POSIX 标准全名）

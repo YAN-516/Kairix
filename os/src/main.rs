@@ -178,7 +178,7 @@ use polyhal::irq::IRQ;
 use polyhal_boot::*;
 
 use crate::signal::Signal;
-use crate::syscall::signal::deliver_signal;
+use crate::syscall::signal::{deliver_fault_signal, deliver_signal};
 use drivers::block::*;
 use polyhal_trap::trap::init_trap;
 use polyhal_trap::trap::*;
@@ -917,15 +917,16 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             print_user_crash_mapping(ctx.pc());
                             print_user_crash_registers(ctx, ctx.pc());
                             print_user_crash_signal_state(&task, &process, Signal::SigBus);
-                            // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
-                            // sigreturn 后将导致无限死循环
-                            let mut t_inner = task.inner_exclusive_access();
-                            t_inner.blocked_signals.remove(Signal::SigBus);
-                            drop(t_inner);
-                            let mut p_inner = process.inner_exclusive_access();
-                            p_inner.blocked_signals.remove(Signal::SigBus);
-                            drop(p_inner);
-                            deliver_signal(&process, Signal::SigBus);
+                            // A file-backed access beyond EOF is a synchronous
+                            // BUS_ADRERR directed at the faulting thread.
+                            const BUS_ADRERR: i32 = 2;
+                            deliver_fault_signal(
+                                &process,
+                                &task,
+                                Signal::SigBus,
+                                BUS_ADRERR,
+                                _paddr,
+                            );
                             if process.inner_exclusive_access().is_zombie {
                                 exit_current_and_run_next(128 + Signal::SigBus.as_i32());
                             }
@@ -958,15 +959,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             print_user_crash_mapping(ctx.pc());
                             print_user_crash_registers(ctx, ctx.pc());
                             print_user_crash_signal_state(&task, &process, Signal::SigSegv);
-                            // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
-                            // sigreturn 后将导致无限死循环
-                            let mut t_inner = task.inner_exclusive_access();
-                            t_inner.blocked_signals.remove(Signal::SigSegv);
-                            drop(t_inner);
-                            let mut p_inner = process.inner_exclusive_access();
-                            p_inner.blocked_signals.remove(Signal::SigSegv);
-                            drop(p_inner);
-                            deliver_signal(&process, Signal::SigSegv);
+                            const SEGV_MAPERR: i32 = 1;
+                            const SEGV_ACCERR: i32 = 2;
+                            let si_code = {
+                                let mut vm_set = process.vm_exclusive_access();
+                                if vm_set.find_area(VirtAddr::from(_paddr)).is_some() {
+                                    SEGV_ACCERR
+                                } else {
+                                    SEGV_MAPERR
+                                }
+                            };
+                            deliver_fault_signal(&process, &task, Signal::SigSegv, si_code, _paddr);
                             if process.inner_exclusive_access().is_zombie {
                                 exit_current_and_run_next(128 + Signal::SigSegv.as_i32());
                             }

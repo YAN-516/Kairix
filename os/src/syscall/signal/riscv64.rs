@@ -3,7 +3,7 @@ use super::common::{
     LinuxStack, commit_signal_stack, consume_pending_signal, discard_pending_signal,
     finish_signaled_process, handle_signal_frame_failure, prepare_signal_stack,
     restore_signal_alt_stack, restore_wait_mask_without_signal_frame, stop_process,
-    write_alt_stack_to_ucontext,
+    write_alt_stack_to_ucontext, write_linux_siginfo,
 };
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{
@@ -635,18 +635,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 构建信号帧内容（清零后填充关键字段）
             let mut frame = [0u8; SIGFRAME_SIZE];
             // siginfo_t at offset 0
-            if let Some(ref siginfo) = last_siginfo {
-                frame[0..4].copy_from_slice(&siginfo.si_signo.to_ne_bytes());
-                frame[4..8].copy_from_slice(&siginfo.si_errno.to_ne_bytes());
-                frame[8..12].copy_from_slice(&siginfo.si_code.to_ne_bytes());
-                frame[16..20].copy_from_slice(&siginfo.si_pid.to_ne_bytes());
-                frame[20..24].copy_from_slice(&(siginfo.si_uid as i32).to_ne_bytes());
-                let mut val_bytes = [0u8; 8];
-                val_bytes[0..4].copy_from_slice(&siginfo.si_value.to_ne_bytes());
-                frame[24..32].copy_from_slice(&val_bytes);
-            } else {
-                frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
-            }
+            write_linux_siginfo(&mut frame, signal, last_siginfo.as_ref());
 
             // ucontext_t at offset SIGINFO_SIZE (128)
             // uc_sigmask at ucontext + 40 (128 bytes in musl)

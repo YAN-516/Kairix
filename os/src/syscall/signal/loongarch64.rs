@@ -3,7 +3,7 @@ use super::common::{
     LinuxStack, commit_signal_stack, consume_pending_signal, discard_pending_signal,
     finish_signaled_process, handle_signal_frame_failure, prepare_signal_stack,
     restore_signal_alt_stack, restore_wait_mask_without_signal_frame, stop_process,
-    write_alt_stack_to_ucontext,
+    write_alt_stack_to_ucontext, write_linux_siginfo,
 };
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{translated_byte_buffer_for_write, translated_ref, write_user_value};
@@ -15,13 +15,74 @@ use crate::trap::_set_sum_bit;
 use log::{debug, error, info, trace};
 use polyhal_trap::trapframe::TrapFrameArgs;
 
-// Kairix keeps the base scalar FP image at the existing mcontext offsets for
-// compatibility, followed by the upper 64-bit lane of every LSX register.
-// Together the two arrays reconstruct all 32 128-bit vector registers.
-const LSX_UPPER_CONTEXT_OFFSET: usize = 536;
-const LSX_UPPER_CONTEXT_SIZE: usize = 32 * 8;
-const LOONGARCH_MCONTEXT_SIZE: usize = LSX_UPPER_CONTEXT_OFFSET + LSX_UPPER_CONTEXT_SIZE;
-const LOONGARCH_UCONTEXT_SIZE: usize = 1216;
+// Linux LoongArch rt_sigframe layout.  In particular, sc_pc is separate from
+// sc_regs[32], and floating-point/vector state is described by an extensible
+// sctx_info record.  User programs such as QEMU inspect this layout directly
+// from their SA_SIGINFO handler, so a private kernel-only layout is not ABI
+// compatible even when our own rt_sigreturn can read it back symmetrically.
+const SIGINFO_SIZE: usize = 128;
+const UCONTEXT_MCONTEXT_OFFSET: usize = 176;
+const SIGCONTEXT_REGS_OFFSET: usize = 8;
+const SIGCONTEXT_FLAGS_OFFSET: usize = 264;
+const SIGCONTEXT_EXTCONTEXT_OFFSET: usize = 272;
+const SC_USED_FP: u32 = 1;
+
+const SCTX_INFO_SIZE: usize = 16;
+const LSX_CTX_MAGIC: u32 = 0x5358_0001;
+const LSX_CONTEXT_REGS_SIZE: usize = 32 * 16;
+const LSX_CONTEXT_SIZE: usize = 528;
+const LSX_SCTX_SIZE: usize = SCTX_INFO_SIZE + LSX_CONTEXT_SIZE;
+const LSX_CONTEXT_OFFSET: usize = SIGCONTEXT_EXTCONTEXT_OFFSET + SCTX_INFO_SIZE;
+const LSX_CONTEXT_FCC_OFFSET: usize = LSX_CONTEXT_OFFSET + LSX_CONTEXT_REGS_SIZE;
+const LSX_CONTEXT_FCSR_OFFSET: usize = LSX_CONTEXT_FCC_OFFSET + 8;
+const END_SCTX_OFFSET: usize = SIGCONTEXT_EXTCONTEXT_OFFSET + LSX_SCTX_SIZE;
+const LOONGARCH_MCONTEXT_SIZE: usize = END_SCTX_OFFSET + SCTX_INFO_SIZE;
+const LOONGARCH_SIGFRAME_SIZE: usize =
+    SIGINFO_SIZE + UCONTEXT_MCONTEXT_OFFSET + LOONGARCH_MCONTEXT_SIZE;
+
+const _: () = {
+    assert!(SIGCONTEXT_EXTCONTEXT_OFFSET % 16 == 0);
+    assert!(LSX_CONTEXT_OFFSET % 16 == 0);
+    assert!(LSX_CONTEXT_SIZE == LSX_CONTEXT_REGS_SIZE + 8 + 4 + 4);
+    assert!(LSX_SCTX_SIZE % 16 == 0);
+    assert!(END_SCTX_OFFSET == 816);
+    assert!(LOONGARCH_MCONTEXT_SIZE == 832);
+    assert!(LOONGARCH_SIGFRAME_SIZE == 1136);
+    assert!(LOONGARCH_SIGFRAME_SIZE % 16 == 0);
+};
+
+fn write_linux_mcontext(
+    frame: &mut [u8],
+    pc: usize,
+    regs: &[usize; 32],
+    vectors: &[[u64; 2]; 32],
+    fcc: &[u8; 8],
+    fcsr: usize,
+) {
+    let base = SIGINFO_SIZE + UCONTEXT_MCONTEXT_OFFSET;
+    frame[base..base + 8].copy_from_slice(&pc.to_ne_bytes());
+    for (index, value) in regs.iter().enumerate() {
+        let value = if index == 0 { 0 } else { *value };
+        let offset = base + SIGCONTEXT_REGS_OFFSET + index * 8;
+        frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+    }
+    frame[base + SIGCONTEXT_FLAGS_OFFSET..base + SIGCONTEXT_FLAGS_OFFSET + 4]
+        .copy_from_slice(&SC_USED_FP.to_ne_bytes());
+
+    let info = base + SIGCONTEXT_EXTCONTEXT_OFFSET;
+    frame[info..info + 4].copy_from_slice(&LSX_CTX_MAGIC.to_ne_bytes());
+    frame[info + 4..info + 8].copy_from_slice(&(LSX_SCTX_SIZE as u32).to_ne_bytes());
+
+    for (index, vector) in vectors.iter().enumerate() {
+        let offset = base + LSX_CONTEXT_OFFSET + index * 16;
+        frame[offset..offset + 8].copy_from_slice(&vector[0].to_ne_bytes());
+        frame[offset + 8..offset + 16].copy_from_slice(&vector[1].to_ne_bytes());
+    }
+    frame[base + LSX_CONTEXT_FCC_OFFSET..base + LSX_CONTEXT_FCC_OFFSET + 8].copy_from_slice(fcc);
+    frame[base + LSX_CONTEXT_FCSR_OFFSET..base + LSX_CONTEXT_FCSR_OFFSET + 4]
+        .copy_from_slice(&(fcsr as u32).to_ne_bytes());
+    // The zero-filled sctx_info at END_SCTX_OFFSET terminates Linux's parser.
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -178,10 +239,8 @@ pub fn handle_pending_signals() {
         let trap_cx = current_trap_cx();
         let original_sepc = trap_cx.pc();
         let _original_era = trap_cx.era;
-        let original_prmd = trap_cx.prmd;
         let original_regs: [usize; 32] = trap_cx.regs;
-        let original_f = trap_cx.scalar_fp_regs();
-        let original_lsx_upper = trap_cx.lsx_upper_regs();
+        let original_vectors = trap_cx.vr;
         let original_fcc = trap_cx.fcc;
         let original_fcsr = trap_cx.fcsr;
         let saved_mask = inner.blocked_signals;
@@ -189,48 +248,39 @@ pub fn handle_pending_signals() {
         trap_cx.era = handler as usize;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG0] = signo as usize;
         // 统一在用户栈构建信号帧（Linux 风格，避免 longjmp 导致内核内存泄漏）
-        const SIGINFO_SIZE: usize = 128;
-        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE;
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
-        let Some(frame_bottom) = sp.checked_sub(SIGFRAME_SIZE) else {
+        let Some(frame_bottom) = sp.checked_sub(LOONGARCH_SIGFRAME_SIZE) else {
             return;
         };
         let new_sp = frame_bottom & !0xf;
         let token = process.user_token();
 
-        let mut frame = [0u8; SIGFRAME_SIZE];
+        let mut frame = [0u8; LOONGARCH_SIGFRAME_SIZE];
         frame[0..4].copy_from_slice(&signo.to_ne_bytes());
 
         let mask = saved_mask.bits();
         frame[SIGINFO_SIZE + 40..SIGINFO_SIZE + 48].copy_from_slice(&mask.to_ne_bytes());
 
-        let mcontext_base = SIGINFO_SIZE + 176;
-        frame[mcontext_base..mcontext_base + 8].copy_from_slice(&original_sepc.to_ne_bytes());
-        for i in 1..32 {
-            let offset = mcontext_base + i * 8;
-            frame[offset..offset + 8].copy_from_slice(&original_regs[i].to_ne_bytes());
-        }
-        frame[mcontext_base + 256..mcontext_base + 264]
-            .copy_from_slice(&original_prmd.to_ne_bytes());
-        for (index, value) in original_f.iter().enumerate() {
-            let offset = mcontext_base + 264 + index * 8;
-            frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
-        }
-        frame[mcontext_base + 520..mcontext_base + 528].copy_from_slice(&original_fcc);
-        frame[mcontext_base + 528..mcontext_base + 536]
-            .copy_from_slice(&original_fcsr.to_ne_bytes());
-        for (index, value) in original_lsx_upper.iter().enumerate() {
-            let offset = mcontext_base + LSX_UPPER_CONTEXT_OFFSET + index * 8;
-            frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
-        }
+        write_linux_mcontext(
+            &mut frame,
+            original_sepc,
+            &original_regs,
+            &original_vectors,
+            &original_fcc,
+            original_fcsr,
+        );
 
-        let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
+        let bufs = match translated_byte_buffer_for_write(
+            token,
+            new_sp as *mut u8,
+            LOONGARCH_SIGFRAME_SIZE,
+        ) {
             Ok(bufs) => bufs,
             Err(_) => return,
         };
         let mut written = 0;
         for buf in bufs {
-            let len = buf.len().min(SIGFRAME_SIZE - written);
+            let len = buf.len().min(LOONGARCH_SIGFRAME_SIZE - written);
             buf[..len].copy_from_slice(&frame[written..written + len]);
             written += len;
         }
@@ -275,8 +325,6 @@ pub fn handle_pending_signals() {
 
 ///
 pub fn sys_rt_sigreturn() -> SyscallResult {
-    const SIGINFO_SIZE: usize = 128;
-
     let task = current_task().unwrap();
     let token = current_user_token();
     let current_sp = current_trap_cx()[polyhal_trap::trapframe::TrapFrameArgs::SP];
@@ -301,8 +349,10 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     ]);
     let restored_mask = SignalSet::from_bits(mask_val);
 
-    // 从用户栈读取通用寄存器、prmd 和完整浮点状态。
-    let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
+    // Read the Linux LoongArch sigcontext and its LSX extension.  The extension
+    // header is part of the user ABI and must be validated before any restored
+    // register state is committed.
+    let mcontext_addr = current_sp + SIGINFO_SIZE + UCONTEXT_MCONTEXT_OFFSET;
     let bufs = crate::mm::translated_byte_buffer(
         token,
         mcontext_addr as *const u8,
@@ -316,24 +366,61 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         copied += len;
     }
 
-    let mut gregs = [0u64; 32];
-    for i in 0..32 {
-        gregs[i] = u64::from_ne_bytes(mcontext_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+    let restored_pc = usize::from_ne_bytes(mcontext_bytes[0..8].try_into().unwrap());
+    let mut gregs = [0usize; 32];
+    for (index, value) in gregs.iter_mut().enumerate() {
+        let offset = SIGCONTEXT_REGS_OFFSET + index * 8;
+        *value = usize::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
     }
-    let prmd_val = usize::from_ne_bytes(mcontext_bytes[32 * 8..32 * 8 + 8].try_into().unwrap());
-    let mut fp_regs = [0u64; 32];
-    for (index, value) in fp_regs.iter_mut().enumerate() {
-        let offset = 264 + index * 8;
-        *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
+    let flags = u32::from_ne_bytes(
+        mcontext_bytes[SIGCONTEXT_FLAGS_OFFSET..SIGCONTEXT_FLAGS_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let info = SIGCONTEXT_EXTCONTEXT_OFFSET;
+    let magic = u32::from_ne_bytes(mcontext_bytes[info..info + 4].try_into().unwrap());
+    let size = u32::from_ne_bytes(mcontext_bytes[info + 4..info + 8].try_into().unwrap()) as usize;
+    let end_magic = u32::from_ne_bytes(
+        mcontext_bytes[END_SCTX_OFFSET..END_SCTX_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let end_size = u32::from_ne_bytes(
+        mcontext_bytes[END_SCTX_OFFSET + 4..END_SCTX_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    if flags & SC_USED_FP == 0
+        || magic != LSX_CTX_MAGIC
+        || size != LSX_SCTX_SIZE
+        || end_magic != 0
+        || end_size != 0
+    {
+        log::error!(
+            "[SIGRETURN_EXTCONTEXT_INVALID] arch=loongarch64 pid={} flags={:#x} magic={:#x} size={} end_magic={:#x} end_size={}",
+            task.process_id(),
+            flags,
+            magic,
+            size,
+            end_magic,
+            end_size,
+        );
+        return Err(SysError::EINVAL);
+    }
+
+    let mut vectors = [[0u64; 2]; 32];
+    for (index, vector) in vectors.iter_mut().enumerate() {
+        let offset = LSX_CONTEXT_OFFSET + index * 16;
+        vector[0] = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
+        vector[1] = u64::from_ne_bytes(mcontext_bytes[offset + 8..offset + 16].try_into().unwrap());
     }
     let mut fcc = [0u8; 8];
-    fcc.copy_from_slice(&mcontext_bytes[520..528]);
-    let fcsr = usize::from_ne_bytes(mcontext_bytes[528..536].try_into().unwrap());
-    let mut lsx_upper = [0u64; 32];
-    for (index, value) in lsx_upper.iter_mut().enumerate() {
-        let offset = LSX_UPPER_CONTEXT_OFFSET + index * 8;
-        *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
-    }
+    fcc.copy_from_slice(&mcontext_bytes[LSX_CONTEXT_FCC_OFFSET..LSX_CONTEXT_FCC_OFFSET + 8]);
+    let fcsr = u32::from_ne_bytes(
+        mcontext_bytes[LSX_CONTEXT_FCSR_OFFSET..LSX_CONTEXT_FCSR_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     restore_signal_alt_stack(&task, saved_alt_stack)?;
 
     let mut t_inner = task.inner_exclusive_access();
@@ -348,27 +435,18 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     drop(t_inner);
 
     let trap_cx = current_trap_cx();
-    // trap_cx.sepc = gregs[0] as usize;
-    trap_cx.set_pc(gregs[0] as usize);
-    let sanitized_prmd = sanitized_user_prmd();
-    if prmd_val != sanitized_prmd {
-        log::error!(
-            "[SIGRETURN_STATUS_SANITIZED] arch=loongarch64 pid={} raw={:#x} sanitized={:#x}",
-            task.process_id(),
-            prmd_val,
-            sanitized_prmd,
-        );
-    }
-    trap_cx.prmd = sanitized_prmd;
-    trap_cx.set_scalar_fp_regs(fp_regs);
-    trap_cx.set_lsx_upper_regs(lsx_upper);
+    trap_cx.set_pc(restored_pc);
+    // PRMD is privileged state and is intentionally absent from the Linux
+    // sigcontext.  Always rebuild the only safe user-return value.
+    trap_cx.prmd = sanitized_user_prmd();
+    trap_cx.vr = vectors;
     trap_cx.fcc = fcc;
     trap_cx.fcsr = fcsr;
     for i in 1..32 {
-        trap_cx.regs[i] = gregs[i] as usize;
+        trap_cx.regs[i] = gregs[i];
     }
     trap_cx.regs[0] = 0;
-    Ok(gregs[4] as usize)
+    Ok(gregs[4])
 }
 /// 在 trap 返回用户态前投递 pending 信号
 ///
@@ -572,21 +650,17 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
         crate::task::signal::SigHandler::Custom(handler) => {
             // 读取原始上下文，用于构建用户栈信号帧（Linux 风格）
             let original_era = ctx.era;
-            let original_prmd = ctx.prmd;
             let original_regs: [usize; 32] = ctx.regs;
-            let original_f = ctx.scalar_fp_regs();
-            let original_lsx_upper = ctx.lsx_upper_regs();
+            let original_vectors = ctx.vr;
             let original_fcc = ctx.fcc;
             let original_fcsr = ctx.fcsr;
             let saved_mask = task_blocked;
             info!("era {:#x}", original_era);
 
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
-            const SIGINFO_SIZE: usize = 128;
-            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE;
             let sp = ctx.regs[3]; // $sp
             let Some(stack_plan) =
-                prepare_signal_stack(&task, sp, target_action.sa_flags, SIGFRAME_SIZE)
+                prepare_signal_stack(&task, sp, target_action.sa_flags, LOONGARCH_SIGFRAME_SIZE)
             else {
                 handle_signal_frame_failure(
                     &process,
@@ -600,20 +674,9 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             let new_sp = stack_plan.frame_sp;
 
             // 构建信号帧内容（清零后填充关键字段）
-            let mut frame = [0u8; SIGFRAME_SIZE];
+            let mut frame = [0u8; LOONGARCH_SIGFRAME_SIZE];
             // siginfo_t at offset 0
-            if let Some(ref siginfo) = last_siginfo {
-                frame[0..4].copy_from_slice(&siginfo.si_signo.to_ne_bytes());
-                frame[4..8].copy_from_slice(&siginfo.si_errno.to_ne_bytes());
-                frame[8..12].copy_from_slice(&siginfo.si_code.to_ne_bytes());
-                frame[16..20].copy_from_slice(&siginfo.si_pid.to_ne_bytes());
-                frame[20..24].copy_from_slice(&(siginfo.si_uid as i32).to_ne_bytes());
-                let mut val_bytes = [0u8; 8];
-                val_bytes[0..4].copy_from_slice(&siginfo.si_value.to_ne_bytes());
-                frame[24..32].copy_from_slice(&val_bytes);
-            } else {
-                frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
-            }
+            write_linux_siginfo(&mut frame, signal, last_siginfo.as_ref());
 
             // ucontext_t at offset SIGINFO_SIZE (128)
             // uc_sigmask at ucontext + 40
@@ -621,42 +684,30 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             frame[SIGINFO_SIZE + 40..SIGINFO_SIZE + 48].copy_from_slice(&mask.to_ne_bytes());
             write_alt_stack_to_ucontext(&mut frame, SIGINFO_SIZE, stack_plan.saved_alt_stack);
 
-            // uc_mcontext at ucontext + 176
-            let mcontext_base = SIGINFO_SIZE + 176;
-            // __gregs[0] (PC) = original era
-            frame[mcontext_base..mcontext_base + 8].copy_from_slice(&original_era.to_ne_bytes());
-            // __gregs[1..31] = original regs[1..31]
-            for i in 1..32 {
-                let offset = mcontext_base + i * 8;
-                frame[offset..offset + 8].copy_from_slice(&original_regs[i].to_ne_bytes());
-            }
-            // 扩展：保存 prmd（紧跟在 __gregs 之后）
-            frame[mcontext_base + 256..mcontext_base + 264]
-                .copy_from_slice(&original_prmd.to_ne_bytes());
-            for (index, value) in original_f.iter().enumerate() {
-                let offset = mcontext_base + 264 + index * 8;
-                frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
-            }
-            frame[mcontext_base + 520..mcontext_base + 528].copy_from_slice(&original_fcc);
-            frame[mcontext_base + 528..mcontext_base + 536]
-                .copy_from_slice(&original_fcsr.to_ne_bytes());
-            for (index, value) in original_lsx_upper.iter().enumerate() {
-                let offset = mcontext_base + LSX_UPPER_CONTEXT_OFFSET + index * 8;
-                frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
-            }
+            write_linux_mcontext(
+                &mut frame,
+                original_era,
+                &original_regs,
+                &original_vectors,
+                &original_fcc,
+                original_fcsr,
+            );
 
             // Write to user stack
-            let bufs =
-                match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
-                    Ok(bufs) => bufs,
-                    Err(error) => {
-                        handle_signal_frame_failure(&process, &task, signal, is_task_level, error);
-                        return;
-                    }
-                };
+            let bufs = match translated_byte_buffer_for_write(
+                token,
+                new_sp as *mut u8,
+                LOONGARCH_SIGFRAME_SIZE,
+            ) {
+                Ok(bufs) => bufs,
+                Err(error) => {
+                    handle_signal_frame_failure(&process, &task, signal, is_task_level, error);
+                    return;
+                }
+            };
             let mut written = 0;
             for buf in bufs {
-                let len = buf.len().min(SIGFRAME_SIZE - written);
+                let len = buf.len().min(LOONGARCH_SIGFRAME_SIZE - written);
                 buf[..len].copy_from_slice(&frame[written..written + len]);
                 written += len;
             }
