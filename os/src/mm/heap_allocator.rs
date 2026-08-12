@@ -14,8 +14,8 @@ use log::*;
 use polyhal::print;
 
 const KERNEL_HEAP_ORDER: usize = 32;
-const KERNEL_HEAP_BOOTSTRAP_SIZE: usize = 1024 * 1024 * 1024;
-const KERNEL_HEAP_GROW_CHUNK_SIZE: usize = 128 * 1024 * 1024;
+const KERNEL_HEAP_BOOTSTRAP_SIZE: usize = 64 * 1024 * 1024;
+const KERNEL_HEAP_GROW_CHUNK_SIZE: usize = 32 * 1024 * 1024;
 const KERNEL_HEAP_MIN_FRAME_RESERVE: usize = 16 * 1024 * 1024;
 const KERNEL_HEAP_MAX_PHYS_FRACTION: usize = 4;
 

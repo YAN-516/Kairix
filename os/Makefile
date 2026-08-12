@@ -25,10 +25,10 @@ VF2_SD_SMOKE ?= 0
 VF2_ROOT_PART ?= 5
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
-# Global BuildStorm attribution is always installed at the path selected by
-# initproc's final test suite. Keep this fixed so `make rkernel_test` and
-# `make lkernel_test` cannot accidentally run a stale image copy.
+# Global BuildStorm attribution is installed alongside the image's original
+# BuildStorm script at the path selected by initproc's final test suite.
 BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
+BUILDSTORM_IMAGE_TESTCODE := /glibc/buildstorm_2_testcode.sh
 BUILDSTORM_DIAG_VERSION := 2026-08-02.17
 export LOG
 CARGO_OFFLINE ?= 1
@@ -143,9 +143,9 @@ do-patch-sdcard: mkfs-tools
 	mounted=1; \
 	mkdir -p "$$mnt/glibc"; \
 	echo "  Installing BuildStorm diagnostics $(BUILDSTORM_DIAG_VERSION)..."; \
-	cp "$(BUILDSTORM_TESTCODE)" "$$mnt/glibc/buildstorm_testcode.sh"; \
-	chmod +x "$$mnt/glibc/buildstorm_testcode.sh"; \
-	cmp -s "$(BUILDSTORM_TESTCODE)" "$$mnt/glibc/buildstorm_testcode.sh" || { \
+	cp "$(BUILDSTORM_TESTCODE)" "$$mnt$(BUILDSTORM_IMAGE_TESTCODE)"; \
+	chmod +x "$$mnt$(BUILDSTORM_IMAGE_TESTCODE)"; \
+	cmp -s "$(BUILDSTORM_TESTCODE)" "$$mnt$(BUILDSTORM_IMAGE_TESTCODE)" || { \
 		echo "Error: BuildStorm script verification failed after copy" >&2; \
 		exit 1; \
 	}; \

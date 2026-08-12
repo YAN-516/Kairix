@@ -44,7 +44,7 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 ];
 
 /// 默认自动测试脚本。只会按这里的顺序执行列出的脚本，不再扫描目录。
-const FINAL_TEST_SCRIPTS: &[&str] = &[ "/glibc/cagent_testcode.sh","/glibc/buildstorm_testcode.sh"];
+const FINAL_TEST_SCRIPTS: &[&str] = &["/glibc/cagent_testcode.sh", "/glibc/buildstorm_testcode.sh"];
 
 /// 初赛自动测试脚本。通过构建参数显式选择时按原顺序执行。
 const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
@@ -62,13 +62,37 @@ const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
-    // "/musl/iperf_testcode.sh",
-    // "/musl/netperf_testcode.sh",
-    // "/glibc/iperf_testcode.sh",
-    // "/glibc/netperf_testcode.sh",
+    "/musl/iperf_testcode.sh",
+    "/musl/netperf_testcode.sh",
+    "/glibc/iperf_testcode.sh",
+    "/glibc/netperf_testcode.sh",
     "/glibc/lmbench_testcode.sh",
     "/sdcard/musl/ltp_testcode.sh",
     "/sdcard/glibc/ltp_testcode.sh",
+];
+
+/// 用于从评测镜像识别初赛环境的原始脚本。
+/// `/sdcard/*/ltp_testcode.sh` 是 initproc 启动后生成的兼容视图，不参与镜像识别。
+const PRELIMINARY_PROBE_SCRIPTS: &[&str] = &[
+    "/musl/iozone_testcode.sh",
+    "/glibc/iozone_testcode.sh",
+    "/musl/basic_testcode.sh",
+    "/musl/busybox_testcode.sh",
+    "/musl/cyclictest_testcode.sh",
+    "/musl/libctest_testcode.sh",
+    "/musl/libcbench_testcode.sh",
+    "/musl/lua_testcode.sh",
+    "/musl/lmbench_testcode.sh",
+    "/glibc/basic_testcode.sh",
+    "/glibc/busybox_testcode.sh",
+    "/glibc/cyclictest_testcode.sh",
+    "/glibc/libcbench_testcode.sh",
+    "/glibc/lua_testcode.sh",
+    "/musl/iperf_testcode.sh",
+    "/musl/netperf_testcode.sh",
+    "/glibc/iperf_testcode.sh",
+    "/glibc/netperf_testcode.sh",
+    "/glibc/lmbench_testcode.sh",
 ];
 
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
@@ -412,6 +436,18 @@ fn auto_test_disabled() -> bool {
     file_exists(AUTO_TEST_DISABLE_FLAG)
 }
 
+fn all_scripts_exist(scripts: &[&str]) -> bool {
+    scripts.iter().all(|script| file_exists(script))
+}
+
+fn report_missing_scripts(suite: &str, scripts: &[&str]) {
+    for script in scripts {
+        if !file_exists(script) {
+            println!("[initproc] {} suite missing {}", suite, script);
+        }
+    }
+}
+
 fn env_for_script(path: &str) -> &'static [&'static str] {
     if path.starts_with("/sdcard/glibc/") {
         SDCARD_GLIBC_ENV
@@ -649,8 +685,25 @@ fn main() -> i32 {
         if run_test_scripts("preliminary", PRELIMINARY_TEST_SCRIPTS) {
             return 0;
         }
-    } else if run_test_scripts("final", FINAL_TEST_SCRIPTS) {
-        return 0;
+    } else {
+        let preliminary_ready = all_scripts_exist(PRELIMINARY_PROBE_SCRIPTS);
+        let final_ready = all_scripts_exist(FINAL_TEST_SCRIPTS);
+
+        if preliminary_ready {
+            println!("[initproc] preliminary test suite detected from disk");
+            if run_test_scripts("preliminary", PRELIMINARY_TEST_SCRIPTS) {
+                return 0;
+            }
+        } else if final_ready {
+            println!("[initproc] final test suite detected from disk");
+            if run_test_scripts("final", FINAL_TEST_SCRIPTS) {
+                return 0;
+            }
+        } else {
+            println!("[initproc] no complete official test suite detected");
+            report_missing_scripts("preliminary", PRELIMINARY_PROBE_SCRIPTS);
+            report_missing_scripts("final", FINAL_TEST_SCRIPTS);
+        }
     }
 
     run_interactive_shell();

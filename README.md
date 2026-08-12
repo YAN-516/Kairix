@@ -50,7 +50,7 @@
 
 `AUTO_TEST` 控制启动后的脚本执行模式：
 
-- `final`：默认值，依次执行 `/musl/buildstorm_testcode.sh` 和 `/glibc/cagent_testcode.sh`，完成后关机。
+- `final`：默认值，依次执行 `/glibc/cagent_testcode.sh` 和 `/glibc/buildstorm_2_testcode.sh`，完成后关机。
 - `preliminary`：执行原有初赛测试脚本列表，完成后关机。
 - `off`：不执行测试脚本，进入交互终端。
 
