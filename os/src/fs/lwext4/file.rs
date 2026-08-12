@@ -2070,10 +2070,13 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
 
 impl Drop for Ext4File {
     fn drop(&mut self) {
-        with_lwext4_mount_read_lock_op(&self.mount_gate, Lwext4Op::OpenClose, || {
-            let mut ext4file = self.ext4file.lock();
-            let _ = ext4file.file_close();
-        });
+        // `ext4_fclose()` only invalidates this private descriptor; it neither
+        // accesses filesystem metadata nor performs I/O.  `Drop` owns the
+        // complete Ext4File, so no handle operation or BlockingMutex guard can
+        // still exist.  Closing through the mount gate here can deadlock the
+        // single-CPU idle reaper behind a writer whose continuation is ready
+        // but cannot run until the reaper returns to task selection.
+        let _ = self.ext4file.get_mut().file_close();
     }
 }
 

@@ -30,9 +30,12 @@ pub struct ExtDirEntry(ext4_direntry);
 
 impl Drop for ExtDir {
     fn drop(&mut self) {
-        with_lwext4_mount_read_lock_op(&self.gate, Lwext4Op::OpenClose, || unsafe {
+        // `ext4_dir_close()` delegates directly to `ext4_fclose()`, which only
+        // clears this private descriptor. Taking the mount gate from a
+        // destructor can pin a scheduler-idle CPU behind a task-owned writer.
+        unsafe {
             ext4_dir_close(&mut self.dir);
-        });
+        }
     }
 }
 
