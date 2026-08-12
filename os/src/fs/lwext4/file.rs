@@ -2284,10 +2284,16 @@ impl File for Ext4File {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         // info!("enter VFS Write-back Cache");
         let request_len = buf.len();
-        let (inode, write_guard, old_size, start_offset, reserved_end, size_reserved) = {
+        let inode = {
+            let inner = self.inner.lock();
+            inner.dentry.get_inode().unwrap()
+        };
+        // begin_page_cache_write() may yield while writeback owns the inode.
+        // Never wait for it while holding FileInner's non-sleepable spin mutex:
+        // writeback calls get_dentry(), which needs that same mutex.
+        let write_guard = Ext4PageCacheWriteGuard::new(inode.clone());
+        let (old_size, start_offset, reserved_end, size_reserved) = {
             let mut inner = self.inner.lock();
-            let inode = inner.dentry.get_inode().unwrap();
-            let write_guard = Ext4PageCacheWriteGuard::new(inode.clone());
             if inode.get_fs_flags()
                 & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
                 != 0
@@ -2308,14 +2314,7 @@ impl File for Ext4File {
                 inode.extend_size(reserved_end);
             }
             inner.offset = reserved_end;
-            (
-                inode,
-                write_guard,
-                old_size,
-                start_offset,
-                reserved_end,
-                size_reserved,
-            )
+            (old_size, start_offset, reserved_end, size_reserved)
         };
         let (total_write_size, should_flush_cache) =
             match self.write_cached_at(&inode, start_offset, old_size, &buf) {
