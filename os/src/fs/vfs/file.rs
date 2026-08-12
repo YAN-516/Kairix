@@ -4,8 +4,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::Inode;
 use crate::fs::find_superblock_by_path;
-use crate::fs::page::pagecache::PAGE_CACHE;
-use crate::fs::page::pagecache::Page;
+use crate::fs::page::pagecache::{PAGE_CACHE, Page, lock_page_read, lock_page_write};
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
@@ -455,7 +454,7 @@ pub trait File: Send + Sync {
     fn get_cached_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
         let inode_id = self.cache_inode_id()?;
         let page = PAGE_CACHE.get_page_touch(inode_id, page_id)?;
-        page.read().resident_frame()
+        lock_page_read(&page).resident_frame()
     }
 
     /// Mark a page-cache page dirty after a writable MAP_SHARED store fault.
@@ -468,8 +467,7 @@ pub trait File: Send + Sync {
         let page = PAGE_CACHE
             .get_page(inode_id, page_id)
             .ok_or(SysError::EIO)?;
-        page.write()
-            .mark_dirty_with_generation(inode.page_cache_generation());
+        lock_page_write(&page).mark_dirty_with_generation(inode.page_cache_generation());
         Ok(())
     }
 

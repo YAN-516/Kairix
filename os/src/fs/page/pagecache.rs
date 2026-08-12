@@ -10,6 +10,45 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use polyhal::common::FrameTracker;
 use spin::RwLock;
+use spin::rwlock::{RwLockReadGuard, RwLockWriteGuard};
+
+/// Acquire a page-cache read lock without pinning a CPU behind a writer that
+/// may have cooperatively yielded while performing filesystem or block I/O.
+///
+/// Page-cache users can run both in task context and from scheduler-side
+/// teardown. Task-context waiters preserve their kernel continuation and let
+/// the lock owner run; scheduler-side callers have no continuation to park and
+/// therefore retain the ordinary short spin behavior.
+pub fn lock_page_read(page: &RwLock<Page>) -> RwLockReadGuard<'_, Page> {
+    loop {
+        if let Some(guard) = page.try_read() {
+            return guard;
+        }
+        if crate::task::processor::has_current_task_nolock() {
+            crate::task::suspend_current_kernel_continuation();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Write-side counterpart of [`lock_page_read`].
+///
+/// Resuming the exact continuation is required because the caller or lock
+/// owner may already hold outer filesystem state which an exec/exit boundary
+/// must not abandon.
+pub fn lock_page_write(page: &RwLock<Page>) -> RwLockWriteGuard<'_, Page> {
+    loop {
+        if let Some(guard) = page.try_write() {
+            return guard;
+        }
+        if crate::task::processor::has_current_task_nolock() {
+            crate::task::suspend_current_kernel_continuation();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
 
 /// Smallest disk-backed page cache (4096 pages, approximately 16 MiB).
 pub const MIN_DISK_PAGE_CACHE_PAGES: usize = 4096;
