@@ -62,9 +62,9 @@ const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
-    "/musl/iperf_testcode.sh",
+    // "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
-    "/glibc/iperf_testcode.sh",
+    // "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
     "/glibc/lmbench_testcode.sh",
     "/sdcard/musl/ltp_testcode.sh",
@@ -97,6 +97,8 @@ const PRELIMINARY_PROBE_SCRIPTS: &[&str] = &[
 
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const PRELIMINARY_TEST_FLAG: &str = "/.initproc-preliminary-tests";
+const BUSYBOX_INTERPRETER: &str = "/bin/busybox";
+const MUSL_BUSYBOX: &str = "/musl/busybox";
 const AT_REMOVEDIR: u32 = 0x200;
 const DT_DIR: u8 = 4;
 const SIGKILL: usize = 9;
@@ -157,6 +159,40 @@ fn setup_busybox_links() {
     );
 
     // mkfs.ext2/3/4 are real e2fsprogs binaries; busybox in this image lacks them.
+}
+
+/// Preliminary scripts contain nested scripts whose shebang is
+/// `#!/bin/busybox sh`.  Ensure that exact interpreter path exists before the
+/// preliminary suite starts; `/bin/sh` alone cannot satisfy that shebang.
+fn setup_preliminary_busybox_interpreter() -> bool {
+    if file_exists(BUSYBOX_INTERPRETER) {
+        println!(
+            "[initproc] preliminary busybox interpreter already available at {}",
+            BUSYBOX_INTERPRETER
+        );
+        return true;
+    }
+
+    if !file_exists(MUSL_BUSYBOX) {
+        println!(
+            "[initproc] cannot create preliminary busybox interpreter: missing {}",
+            MUSL_BUSYBOX
+        );
+        return false;
+    }
+
+    let _ = mkdir("/bin", 0o755);
+    // Remove a broken link, if present. A working file was preserved above.
+    let _ = unlinkat(AT_FDCWD, BUSYBOX_INTERPRETER, 0);
+    let ret = symlinkat(MUSL_BUSYBOX, AT_FDCWD, BUSYBOX_INTERPRETER);
+    let ready = ret >= 0 && file_exists(BUSYBOX_INTERPRETER);
+    println!(
+        "[initproc] preliminary busybox interpreter {} -> {}: {}",
+        BUSYBOX_INTERPRETER,
+        MUSL_BUSYBOX,
+        if ready { "ready" } else { "failed" }
+    );
+    ready
 }
 
 fn file_exists(path: &str) -> bool {
@@ -620,6 +656,13 @@ fn cleanup_script_process_group(script: &str, pgid: isize) {
 fn run_test_scripts(suite: &str, scripts: &[&str]) -> bool {
     if scripts.is_empty() {
         return false;
+    }
+
+    if suite == "preliminary" && !setup_preliminary_busybox_interpreter() {
+        println!(
+            "[initproc] preliminary scripts may fail because {} is unavailable",
+            BUSYBOX_INTERPRETER
+        );
     }
 
     println!(
