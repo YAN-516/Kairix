@@ -31,10 +31,10 @@ use crate::task::process::{
 use crate::task::signal::{SA_RESTART, SigHandler, Signal};
 use crate::task::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
-    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64,
-    TermStatus, current_process, current_task, current_user_token, exit_current_and_run_next,
-    pid2process, suspend_current_and_run_next, tid2task, wait_current_child_event,
-    wait_current_vfork,
+    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE,
+    RLIMIT_STACK, Rlimit64, TermStatus, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task,
+    wait_current_child_event, wait_current_vfork,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -2032,14 +2032,17 @@ pub fn sys_getpgrp() -> SyscallResult {
     Ok(current_process().getpgid() as usize)
 }
 
-/// Get or update one of the resource limits that Kairix actually enforces.
+/// Get or update a Linux resource limit known to Kairix.
+///
+/// RLIMIT_STACK is currently ABI state only: updating it does not resize or
+/// eagerly allocate user stacks.
 pub fn sys_prlimit64(
     pid: usize,
     resource: i32,
     new_limit: *const u8,
     old_limit: *mut u8,
 ) -> SyscallResult {
-    if resource != RLIMIT_FSIZE && resource != RLIMIT_NOFILE {
+    if resource != RLIMIT_FSIZE && resource != RLIMIT_STACK && resource != RLIMIT_NOFILE {
         return Err(SysError::EINVAL);
     }
     let current_pid = current_task().unwrap().process.upgrade().unwrap().getpid();
@@ -2062,16 +2065,18 @@ pub fn sys_prlimit64(
 
     let old_rlim = {
         let mut inner = process.inner_exclusive_access();
-        let old = if resource == RLIMIT_FSIZE {
-            inner.rlimit_fsize
-        } else {
-            inner.rlimit_nofile
+        let old = match resource {
+            RLIMIT_FSIZE => inner.rlimit_fsize,
+            RLIMIT_STACK => inner.rlimit_stack,
+            RLIMIT_NOFILE => inner.rlimit_nofile,
+            _ => unreachable!(),
         };
         if let Some(limit) = new_rlim {
-            if resource == RLIMIT_FSIZE {
-                inner.rlimit_fsize = limit;
-            } else {
-                inner.rlimit_nofile = limit;
+            match resource {
+                RLIMIT_FSIZE => inner.rlimit_fsize = limit,
+                RLIMIT_STACK => inner.rlimit_stack = limit,
+                RLIMIT_NOFILE => inner.rlimit_nofile = limit,
+                _ => unreachable!(),
             }
         }
         old

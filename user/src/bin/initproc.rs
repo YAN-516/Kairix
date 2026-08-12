@@ -48,6 +48,8 @@ const FINAL_TEST_SCRIPTS: &[&str] = &["/glibc/cagent_testcode.sh", "/glibc/build
 
 /// 初赛自动测试脚本。通过构建参数显式选择时按原顺序执行。
 const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
+    "/sdcard/musl/ltp_testcode.sh",
+    "/sdcard/glibc/ltp_testcode.sh",
     "/musl/iozone_testcode.sh",
     "/glibc/iozone_testcode.sh",
     "/musl/basic_testcode.sh",
@@ -67,8 +69,7 @@ const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
     // "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
     "/glibc/lmbench_testcode.sh",
-    "/sdcard/musl/ltp_testcode.sh",
-    "/sdcard/glibc/ltp_testcode.sh",
+
 ];
 
 /// 用于从评测镜像识别初赛环境的原始脚本。

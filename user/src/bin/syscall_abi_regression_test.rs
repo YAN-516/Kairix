@@ -17,9 +17,37 @@ const SFD_NONBLOCK: i32 = 0o4000;
 pub fn main() -> i32 {
     println!("[syscall_abi_regression_test] start");
 
-    let mut unsupported = Rlimit64::default();
-    if prlimit64(0, 3, None, Some(&mut unsupported)) != -22 {
-        println!("[syscall_abi_regression_test] FAIL prlimit fake success");
+    let mut stack = Rlimit64::default();
+    if prlimit64(0, 3, None, Some(&mut stack)) != 0
+        || stack.rlim_cur == 0
+        || stack.rlim_cur > stack.rlim_max
+    {
+        println!("[syscall_abi_regression_test] FAIL prlimit stack query");
+        return 1;
+    }
+    let invalid_stack = Rlimit64 {
+        rlim_cur: stack.rlim_max.saturating_add(1),
+        rlim_max: stack.rlim_max,
+    };
+    if prlimit64(0, 3, Some(&invalid_stack), None) != -22 {
+        println!("[syscall_abi_regression_test] FAIL prlimit stack validation");
+        return 1;
+    }
+    let lowered_stack = Rlimit64 {
+        rlim_cur: stack.rlim_cur.min(64 * 1024),
+        rlim_max: stack.rlim_max,
+    };
+    let mut previous_stack = Rlimit64::default();
+    let mut current_stack = Rlimit64::default();
+    if prlimit64(0, 3, Some(&lowered_stack), Some(&mut previous_stack)) != 0
+        || previous_stack.rlim_cur != stack.rlim_cur
+        || previous_stack.rlim_max != stack.rlim_max
+        || prlimit64(0, 3, None, Some(&mut current_stack)) != 0
+        || current_stack.rlim_cur != lowered_stack.rlim_cur
+        || current_stack.rlim_max != lowered_stack.rlim_max
+        || prlimit64(0, 3, Some(&stack), None) != 0
+    {
+        println!("[syscall_abi_regression_test] FAIL prlimit stack roundtrip");
         return 1;
     }
     let mut nofile = Rlimit64::default();
