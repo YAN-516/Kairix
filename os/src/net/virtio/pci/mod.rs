@@ -1,3 +1,8 @@
+//! VirtIO PCI 探测和 BAR 辅助。
+//!
+//! 这里只实现网络驱动需要的最小 PCI 访问：扫描 bus 0、识别 VirtIO-net、
+//! 分配未初始化的 MMIO BAR，并把 BAR 物理地址映射到内核 MMIO 虚拟地址。
+
 use core::ptr::{self, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,28 +13,35 @@ use virtio_drivers::transport::pci::bus::{
 };
 
 use super::config::*;
-// use crate::config::KERNEL_SPACE_OFFSET;
-// RISC-V QEMU virt machine defaults
+/// RISC-V QEMU virt 机器默认 ECAM 基址。
 const DEFAULT_ECAM_BASE: u64 = 0x3000_0000;
+/// PCI config 读取到该 vendor id 表示设备不存在。
 const PCI_INVALID_VENDOR_ID: u16 = 0xFFFF;
+/// PCI command: enable I/O space。
 const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;
+/// PCI command: enable memory space。
 const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
+/// PCI command: enable bus mastering。
 const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
 
 const PCI_HEADER_TYPE_OFFSET: u8 = 0x0C;
 const PCI_BAR0_OFFSET: u8 = 0x10;
 const PCI_BAR_MEM_64BIT: u32 = 0x2;
 
-// MMIO window for runtime BAR assignment (inside board PCI MMIO aperture)
+/// 运行期分配 BAR 时使用的 MMIO 窗口起始地址。
 const PCI_MMIO_BAR_START: u64 = 0x4010_0000;
+/// 运行期分配 BAR 时使用的 MMIO 窗口结束地址。
 const PCI_MMIO_BAR_END: u64 = 0x8000_0000;
 
+/// 当前 ECAM 基址，可由 FDT 探测结果覆盖。
 static ECAM_BASE: AtomicU64 = AtomicU64::new(DEFAULT_ECAM_BASE);
+/// 下一个可分配的 MMIO BAR 地址。
 static NEXT_MMIO_BAR_BASE: AtomicU64 = AtomicU64::new(PCI_MMIO_BAR_START);
 
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
 
+/// 将 PCI MMIO 物理地址转换为内核可访问的虚拟地址。
 #[inline]
 pub(crate) fn phys_to_mmio_virt(paddr: u64) -> usize {
     #[cfg(target_arch = "loongarch64")]
@@ -45,6 +57,7 @@ pub(crate) fn phys_to_mmio_virt(paddr: u64) -> usize {
 
 #[allow(unused)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// PCI ranges 中的地址空间类型。
 pub enum PciRangeType {
     ConfigurationSpace,
     IoSpace,
@@ -64,7 +77,7 @@ impl From<u32> for PciRangeType {
     }
 }
 
-/// 32-bit BAR address allocator (for helper APIs)
+/// 32-bit BAR address allocator (for helper APIs)。
 #[allow(unused)]
 pub struct PciMemory32Allocator {
     start: u32,
@@ -73,11 +86,13 @@ pub struct PciMemory32Allocator {
 
 impl PciMemory32Allocator {
     #[allow(unused)]
+    /// 创建一个 `[start, end)` 范围内的 32-bit MMIO 分配器。
     pub const fn new(start: u32, end: u32) -> Self {
         Self { start, end }
     }
 
     #[allow(unused)]
+    /// 分配一个按 `size` 对齐的 32-bit MMIO BAR 地址。
     pub fn allocate_memory_32(&mut self, size: u32) -> u32 {
         assert!(size.is_power_of_two());
         let allocated = align_up_u32(self.start, size);
@@ -88,16 +103,19 @@ impl PciMemory32Allocator {
 }
 
 #[allow(unused)]
+/// 按指定对齐向上取整。
 const fn align_up_u32(value: u32, alignment: u32) -> u32 {
     ((value - 1) | (alignment - 1)) + 1
 }
 
+/// 按指定对齐向上取整。
 #[inline]
 fn align_up_u64(value: u64, alignment: u64) -> u64 {
     (value + alignment - 1) & !(alignment - 1)
 }
 
 #[allow(unused)]
+/// 调试辅助：读取 BAR 内容，便于确认 MMIO 映射是否有效。
 pub fn dump_bar_contents(root: &mut PciRoot, device_function: DeviceFunction, bar_index: u8) {
     let Ok(bar_info) = root.bar_info(device_function, bar_index) else {
         return;
@@ -118,7 +136,7 @@ pub fn dump_bar_contents(root: &mut PciRoot, device_function: DeviceFunction, ba
     }
 }
 
-/// Allocate BARs using PciRoot helper API (not used in runtime path)
+/// Allocate BARs using PciRoot helper API (not used in runtime path)。
 #[allow(unused)]
 pub fn allocate_bars(
     root: &mut PciRoot,
@@ -165,26 +183,34 @@ pub fn allocate_bars(
 }
 
 #[allow(unused)]
+/// 设置 ECAM 基址。
 pub fn set_ecam_base(base: u64) {
     ECAM_BASE.store(base, Ordering::Relaxed);
 }
 
+/// 获取当前 ECAM 基址。
 fn get_ecam_base() -> u64 {
     ECAM_BASE.load(Ordering::Relaxed)
 }
 
+/// PCI BDF 位置。
 #[derive(Debug, Clone, Copy)]
 pub struct PciLocation {
+    /// PCI bus number。
     pub bus: u8,
+    /// PCI slot/device number。
     pub slot: u8,
+    /// PCI function number。
     pub func: u8,
 }
 
 impl PciLocation {
+    /// 构造 PCI 位置。
     pub fn new(bus: u8, slot: u8, func: u8) -> Self {
         Self { bus, slot, func }
     }
 
+    /// 计算指定配置空间偏移的 ECAM 物理地址。
     fn ecam_addr(&self, offset: u8) -> u64 {
         let base = get_ecam_base();
         let bdf =
@@ -192,31 +218,37 @@ impl PciLocation {
         base + bdf + ((offset as u64) & 0xFFC)
     }
 
+    /// 计算指定配置空间偏移的 ECAM 虚拟地址。
     #[inline]
     fn ecam_virt_addr(&self, offset: u8) -> usize {
         phys_to_mmio_virt(self.ecam_addr(offset))
     }
 
+    /// 读取 32 位 PCI 配置空间。
     pub unsafe fn read_config(&self, offset: u8) -> u32 {
         let vaddr = self.ecam_virt_addr(offset);
         unsafe { read_volatile(vaddr as *const u32) }
     }
 
+    /// 写入 32 位 PCI 配置空间。
     pub unsafe fn write_config(&self, offset: u8, value: u32) {
         let vaddr = self.ecam_virt_addr(offset);
         unsafe { write_volatile(vaddr as *mut u32, value) }
     }
 
+    /// 读取 header type，用于判断是否为 multifunction device。
     fn header_type(&self) -> u8 {
         ((unsafe { self.read_config(PCI_HEADER_TYPE_OFFSET) } >> 16) & 0xFF) as u8
     }
 }
 
+/// 判断 PCI function 是否存在。
 fn is_present(loc: &PciLocation) -> bool {
     let vendor_id = (unsafe { loc.read_config(0) } & 0xFFFF) as u16;
     vendor_id != PCI_INVALID_VENDOR_ID
 }
 
+/// 遍历指定 bus/slot 下存在的 function。
 fn iter_functions(bus: u8, slot: u8) -> impl Iterator<Item = PciLocation> {
     info!("Scanning bus {}, slot {} for functions...", bus, slot);
     let loc0 = PciLocation::new(bus, slot, 0);
@@ -228,6 +260,7 @@ fn iter_functions(bus: u8, slot: u8) -> impl Iterator<Item = PciLocation> {
     (0..funcs).map(move |func| PciLocation::new(bus, slot, func))
 }
 
+/// 探测 32-bit memory BAR 的大小。
 fn bar_mem32_size(loc: &PciLocation, bar_offset: u8) -> Option<u32> {
     let original = unsafe { loc.read_config(bar_offset) };
     if original == 0 || original == 0xFFFF_FFFF || (original & 1) != 0 {
@@ -250,6 +283,7 @@ fn bar_mem32_size(loc: &PciLocation, bar_offset: u8) -> Option<u32> {
     Some(size)
 }
 
+/// 探测 64-bit memory BAR 的大小。
 fn bar_mem64_size(loc: &PciLocation, bar_offset: u8) -> Option<u64> {
     if bar_offset >= PCI_BAR0_OFFSET + 5 * 4 {
         return None;
@@ -285,6 +319,9 @@ fn bar_mem64_size(loc: &PciLocation, bar_offset: u8) -> Option<u64> {
 }
 
 /// Assign 32-bit MMIO BARs when firmware did not do it.
+///
+/// 某些启动环境不会给 VirtIO PCI BAR 分配地址，这里在板级 MMIO 窗口中
+/// 做一个简单的运行期分配。
 pub fn ensure_mmio_bars_assigned(loc: &PciLocation) {
     let mut bar = 0u8;
     while bar < 6 {
@@ -388,6 +425,7 @@ pub fn ensure_mmio_bars_assigned(loc: &PciLocation) {
 }
 
 #[allow(unused)]
+/// 扫描指定 device id 的 VirtIO 设备。
 fn scan_for_virtio_device(device_id_target: u16) -> Option<PciLocation> {
     for slot in 0..32 {
         for loc in iter_functions(0, slot) {
@@ -405,6 +443,7 @@ fn scan_for_virtio_device(device_id_target: u16) -> Option<PciLocation> {
     None
 }
 
+/// 扫描任意一个匹配 device id 的 VirtIO 设备。
 fn scan_for_virtio_devices(device_ids: &[u16]) -> Option<PciLocation> {
     for slot in 0..32 {
         for loc in iter_functions(0, slot) {
@@ -423,6 +462,7 @@ fn scan_for_virtio_devices(device_ids: &[u16]) -> Option<PciLocation> {
 }
 
 #[allow(unused)]
+/// 扫描 PCI bus 0 上的 VirtIO-net 设备。
 pub fn scan_for_virtio_net() -> Option<PciLocation> {
     info!("Scanning PCI bus for VirtIO-net device...");
     if let Some(loc) =
@@ -440,6 +480,7 @@ pub fn scan_for_virtio_net() -> Option<PciLocation> {
 }
 
 #[allow(unused)]
+/// 读取 BAR 的 MMIO 基址。
 pub fn get_bar_base(loc: &PciLocation, bar: u8) -> Option<u64> {
     if bar >= 6 {
         return None;
@@ -470,6 +511,7 @@ pub fn get_bar_base(loc: &PciLocation, bar: u8) -> Option<u64> {
 }
 
 #[allow(unused)]
+/// 开启 PCI function 的 memory space 和 bus mastering。
 pub fn enable_bus_master(loc: &PciLocation) {
     let command_status = unsafe { loc.read_config(0x04) };
     let command = (command_status & 0xFFFF) as u16;

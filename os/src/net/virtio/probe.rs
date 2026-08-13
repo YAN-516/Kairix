@@ -1,3 +1,8 @@
+//! VirtIO-net 设备探测流程。
+//!
+//! 优先尝试 PCI transport，失败时再尝试 MMIO transport。探测成功后完成
+//! feature 协商、virtqueue 初始化和 MAC 读取。
+
 use super::config::*;
 use super::device::VirtIONetDevice;
 use core::sync::atomic::Ordering;
@@ -6,6 +11,9 @@ use super::mmio;
 use super::pci::{self, PciLocation};
 
 #[cfg(target_arch = "loongarch64")]
+/// 从 FDT 中读取 PCI ECAM 基址。
+///
+/// LoongArch 平台的 PCI ECAM 可能由设备树描述，不能硬编码为 QEMU virt 默认值。
 fn init_ecam_base_from_fdt() -> bool {
     use flat_device_tree::Fdt;
 
@@ -35,6 +43,7 @@ fn init_ecam_base_from_fdt() -> bool {
 }
 
 #[cfg(not(target_arch = "loongarch64"))]
+/// 非 LoongArch 平台暂不从 FDT 读取 ECAM，使用默认值。
 fn init_ecam_base_from_fdt() -> bool {
     false
 }
@@ -42,6 +51,9 @@ fn init_ecam_base_from_fdt() -> bool {
 #[allow(unused)]
 impl VirtIONetDevice {
     #[inline]
+    /// 从 PCI 配置空间读取一个字节。
+    ///
+    /// 底层只提供 32 位访问，因此这里先对齐再移位。
     fn pci_read_u8(loc: &PciLocation, offset: u16) -> u8 {
         let aligned = (offset & !0x3) as u8;
         let shift = ((offset & 0x3) * 8) as u32;
@@ -49,11 +61,12 @@ impl VirtIONetDevice {
     }
 
     #[inline]
+    /// 从 PCI 配置空间读取一个 32 位值。
     fn pci_read_u32(loc: &PciLocation, offset: u16) -> u32 {
         unsafe { loc.read_config(offset as u8) }
     }
 
-    /// 探测 VirtIO 设备
+    /// 探测 PCI VirtIO-net 设备。
     pub fn probe(&mut self) -> bool {
         if !init_ecam_base_from_fdt() {
             // 兜底：QEMU virt 平台默认 ECAM 为 0x30000000。
@@ -79,6 +92,7 @@ impl VirtIONetDevice {
         self.parse_capabilities(&loc)
     }
 
+    /// 探测 MMIO VirtIO-net 设备。
     pub fn probe_mmio(&mut self) -> bool {
         let Some(transport) = mmio::probe_virtio_net() else {
             return false;
@@ -87,6 +101,10 @@ impl VirtIONetDevice {
         true
     }
 
+    /// 解析 VirtIO PCI capability list。
+    ///
+    /// modern VirtIO PCI 设备把 common/notify/isr/device config 分散在不同
+    /// capability 中，驱动需要找到这些 MMIO 区域才能初始化设备。
     fn parse_capabilities(&mut self, loc: &PciLocation) -> bool {
         let cap_ptr = Self::pci_read_u8(loc, 0x34) as u16;
 
@@ -163,7 +181,10 @@ impl VirtIONetDevice {
             && !self.device_cfg.is_null()
     }
 
-    /// 初始化设备
+    /// 初始化设备。
+    ///
+    /// 按 VirtIO 规范执行 reset、status 握手、feature 协商、队列初始化，
+    /// 最后置 `DRIVER_OK` 并开始补 RX buffer。
     pub fn init_device(&mut self) -> Result<(), &'static str> {
         if self.common_cfg.is_null() && self.mmio.is_none() {
             return Err("Common config not found");
@@ -205,6 +226,7 @@ impl VirtIONetDevice {
 ///
 /// 调用方只需要拿到一个已经完成硬件发现和初始化的网络设备。
 #[cfg_attr(board = "visionfive2", allow(dead_code))]
+#[cfg_attr(board = "2k1000", allow(dead_code))]
 pub fn probe_virtio_net(name: &str) -> Option<VirtIONetDevice> {
     let mut device = VirtIONetDevice::new(name);
     if !device.probe() && !device.probe_mmio() {

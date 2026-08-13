@@ -117,7 +117,14 @@ pub struct ZeroInode {
 impl ZeroInode {
     ///
     pub fn new() -> Self {
-        let mode = InodeMode::CHAR;
+        // Match Linux /dev/zero permissions: crw-rw-rw- (0666).
+        let mode = InodeMode::CHAR
+            | InodeMode::OWNER_READ
+            | InodeMode::OWNER_WRITE
+            | InodeMode::GROUP_READ
+            | InodeMode::GROUP_WRITE
+            | InodeMode::OTHER_READ
+            | InodeMode::OTHER_WRITE;
         Self {
             inner: InodeInner::new(inode_alloc(), 0, mode, make_rdev(1, 5) as usize),
         }

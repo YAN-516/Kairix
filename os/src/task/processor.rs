@@ -6,10 +6,8 @@ use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
-use crate::set_init_completed;
 use crate::sync::{IrqGuard, SpinNoIrqLock};
 use crate::task::check_timers;
-use crate::wait_for_init;
 use alloc::sync::Arc;
 #[cfg(target_arch = "loongarch64")]
 use core::arch::asm;
@@ -1339,10 +1337,6 @@ pub fn run_tasks() {
     crate::syscall::hwprobe::record_current_cpu(id);
     crate::task::manager::mark_cpu_online(id);
     //println!("cpu {} run tasks", id);
-    if id == 0 {
-        set_init_completed();
-        // loop{}
-    }
     // Keeping the last process alive lets the scheduler safely execute through
     // its kernel-half mappings until another address space is selected. This
     // avoids a user->kernel->user root switch on every voluntary yield while
@@ -1390,7 +1384,15 @@ pub fn run_tasks() {
         // so a corrupted check_timers return cannot be mistaken for pselect.
         record_scheduler_phase(9, None);
         record_scheduler_phase(12, None);
-        check_io_progress_watchdog(id);
+        // The watchdog only produces diagnostic snapshots.  On the LS2K1000
+        // the boot CPU continues to use the boot/idle stack while the other
+        // harts are being brought up; walking every PCB/TCB from that stack
+        // has been observed to corrupt the interrupted kernel continuation.
+        // Keep normal scheduling and timer wakeups independent from this
+        // optional reporting path on the board.
+        if !cfg!(board = "2k1000") {
+            check_io_progress_watchdog(id);
+        }
         record_scheduler_phase(1, None);
         crate::task::reap_deferred_exited_tasks();
         crate::task::reap_deferred_process_user_spaces();
@@ -1600,7 +1602,7 @@ pub fn run_tasks() {
                     );
                     record_scheduler_phase(23, None);
                 }
-                if spins == 100_000 || spins % 10_000_000 == 0 {
+                if !cfg!(board = "2k1000") && (spins == 100_000 || spins % 10_000_000 == 0) {
                     record_scheduler_phase(24, None);
                     dump_stall_snapshot(id, spins);
                     record_scheduler_phase(25, None);

@@ -1,3 +1,8 @@
+//! ARP 地址解析。
+//!
+//! 该模块维护 IPv4 到 MAC 的简单缓存，负责发送 ARP request/reply，
+//! 并在收到 ARP 响应时唤醒邻居层中等待该 MAC 的数据包。
+
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -9,12 +14,18 @@ use super::ethernet::{ETH_P_ARP, EthernetHeader};
 use super::skb::Skb;
 
 #[allow(unused)]
+/// ARP 请求操作码。
 const ARP_REQUEST: u16 = 1;
+/// ARP 回复操作码。
 const ARP_REPLY: u16 = 2;
+/// 以太网硬件类型。
 const HARD_TYPE_ETHERNET: u16 = 1;
+/// ARP payload 中声明的上层协议为 IPv4。
 const PROTO_IP: u16 = 0x0800;
 
-/// ARP 包结构
+/// ARP 包结构。
+///
+/// 当前只支持 Ethernet + IPv4，因此地址长度固定为 MAC 6 字节、IPv4 4 字节。
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 pub struct ArpPacket {
@@ -36,7 +47,7 @@ impl ArpPacket {
     }
 }
 
-/// ARP 缓存条目
+/// ARP 缓存条目。
 #[allow(unused)]
 #[derive(Clone)]
 struct ArpEntry {
@@ -44,10 +55,14 @@ struct ArpEntry {
     dev: Arc<dyn NetDevice>, // 关联的网络设备
 }
 
-/// 全局 ARP 缓存
+/// 全局 ARP 缓存。
+///
+/// key 为 IPv4 地址，value 为解析到的 MAC 和对应设备。
 static ARP_CACHE: Mutex<BTreeMap<u32, ArpEntry>> = Mutex::new(BTreeMap::new());
 #[allow(unused)]
-/// 添加 ARP 缓存条目
+/// 添加 ARP 缓存条目。
+///
+/// 新条目写入后会通知邻居层发送此前因等待 ARP 而暂存的数据包。
 pub fn arp_add_entry(ip: u32, mac: [u8; 6], dev: Arc<dyn NetDevice>) {
     ARP_CACHE.lock().insert(ip, ArpEntry { mac, dev });
     super::neighbor::flush_pending_for(ip, mac); // 刷新等待该 MAC 地址的数据包
@@ -66,12 +81,14 @@ pub fn arp_add_entry(ip: u32, mac: [u8; 6], dev: Arc<dyn NetDevice>) {
     );
 }
 
-/// 查找 ARP 缓存
+/// 查找 ARP 缓存。
 pub fn arp_lookup(ip: u32) -> Option<[u8; 6]> {
     ARP_CACHE.lock().get(&ip).map(|entry| entry.mac)
 }
 
-/// 发送 ARP 请求
+/// 发送 ARP 请求。
+///
+/// 请求以二层广播形式发出，询问 `ip` 对应的 MAC 地址。
 pub fn arp_request(ip: u32, dev: Arc<dyn NetDevice>) -> Result<(), &'static str> {
     let sender_ip = dev.ip_addr();
 
@@ -127,7 +144,10 @@ pub fn arp_request(ip: u32, dev: Arc<dyn NetDevice>) -> Result<(), &'static str>
     Ok(())
 }
 #[allow(unused)]
-/// 处理接收到的 ARP 包
+/// 处理接收到的 ARP 包。
+///
+/// 收到任意合法 ARP 包都会先学习发送者地址；如果该包是发给本机的 request，
+/// 再发送 reply。
 pub fn arp_rcv(skb: Skb, dev: Arc<dyn NetDevice>) {
     if skb.len() < ArpPacket::size() {
         log::info!("ARP: packet too short");
@@ -162,7 +182,7 @@ pub fn arp_rcv(skb: Skb, dev: Arc<dyn NetDevice>) {
     }
 }
 
-/// 发送 ARP 回复
+/// 发送 ARP 回复。
 fn arp_reply(target_ip: u32, target_mac: [u8; 6], dev: Arc<dyn NetDevice>) {
     log::info!(
         "ARP: sending reply to {}.{}.{}.{}",

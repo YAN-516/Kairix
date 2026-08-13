@@ -1,3 +1,8 @@
+//! IPv4 收发处理。
+//!
+//! 该模块负责 IPv4 头部校验、按协议号分发到 ICMP/UDP/TCP/raw socket，
+//! 以及发送路径的 IPv4 头部封装和路由查找。
+
 use crate::net::device::XmitError;
 use crate::net::icmp::icmp_rcv;
 use crate::net::neighbor::neighbour_output;
@@ -10,20 +15,32 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::debug;
 use spin::Mutex;
-/// IPv4头结构
+/// IPv4 头结构。
+///
+/// 字段按网络字节序存放在包内，访问器会转换成主机字节序。
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 #[allow(unused)]
 pub struct Ipv4Header {
+    /// 高 4 位为版本号，低 4 位为头部长度（以 4 字节为单位）。
     version_ihl: u8,
+    /// 服务类型/DSCP/ECN。
     tos: u8,
+    /// IP 包总长度，包含 IP 头和 payload。
     total_len: u16,
+    /// 分片标识。
     id: u16,
+    /// 分片标志和片偏移。
     flags_frag: u16,
+    /// 生存时间。
     ttl: u8,
+    /// 上层协议号，如 ICMP=1、TCP=6、UDP=17。
     protocol: u8,
+    /// IPv4 头部校验和。
     checksum: u16,
+    /// 源 IPv4 地址。
     src_addr: u32,
+    /// 目标 IPv4 地址。
     dst_addr: u32,
 }
 
@@ -65,7 +82,9 @@ impl Ipv4Header {
     }
 }
 
-/// Internet checksum over bytes in network order.
+/// 按网络字节序计算 Internet checksum。
+///
+/// IPv4 校验和只覆盖 IP 头；TCP/UDP 会在各自模块中额外计算伪首部校验和。
 #[allow(unused)]
 fn ip_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
@@ -85,10 +104,10 @@ fn ip_checksum(data: &[u8]) -> u16 {
     !sum as u16
 }
 
-/// 全局本机 IP 地址列表
+/// 全局本机 IP 地址列表。
 static LOCAL_IPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
-/// 添加本机 IP 地址
+/// 添加本机 IP 地址。
 #[allow(unused)]
 pub fn add_local_ip(ip: u32) {
     LOCAL_IPS.lock().push(ip);
@@ -101,7 +120,9 @@ pub fn add_local_ip(ip: u32) {
     );
 }
 
-/// 检查是否是本机 IP
+/// 检查一个 IPv4 地址是否属于本机。
+///
+/// 回环网段 `127.0.0.0/8` 总是视为本机，其余地址来自初始化阶段注册。
 pub fn is_local_ip(ip: u32) -> bool {
     // 检查 127.0.0.0/8 回环
     if (ip & 0xFF000000) == 0x7F000000 {
@@ -112,7 +133,10 @@ pub fn is_local_ip(ip: u32) -> bool {
 }
 
 #[allow(unused)]
-/// IP 接收处理
+/// IP 接收处理。
+///
+/// 接收路径会验证 IPv4 版本、头长、总长度和头部校验和；只有目的地址属于
+/// 本机时才继续分发到上层协议。
 pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     debug!("IP: received packet of {} bytes", skb.len());
     if skb.len() < core::mem::size_of::<Ipv4Header>() {
@@ -199,7 +223,10 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     }
 }
 
-/// IP 发送
+/// IP 发送。
+///
+/// 调用者传入已经包含上层协议 payload 的 `Skb`，本函数负责追加 IPv4 头、
+/// 计算校验和、查找路由，并交给邻居层封装以太网头。
 pub fn ip_queue_xmit(
     mut skb: Skb,
     src: u32,
@@ -220,7 +247,10 @@ pub fn ip_queue_xmit(
         ip_header.tos = 0;
         ip_header.set_total_len(skb.len() as u16);
         ip_header.id = ((fast_random() & 0xFFFF) as u16).to_be();
-        ip_header.flags_frag = 0;
+        // TCP uses Path MTU Discovery.  This stack does not implement IPv4
+        // fragmentation, so setting DF lets routers report a smaller path MTU
+        // through ICMP type 3/code 4 instead of silently fragmenting or dropping.
+        ip_header.flags_frag = if protocol == 6 { 0x4000u16.to_be() } else { 0 };
         ip_header.ttl = 64;
         ip_header.checksum = 0;
         ip_header.protocol = protocol;
@@ -261,7 +291,9 @@ pub fn ip_queue_xmit(
     neighbour_output(skb, nexthop, dev)
 }
 
-/// 简单的随机数生成器
+/// 简单的随机数生成器。
+///
+/// 当前仅用于生成 IPv4 ID，不用于安全场景。
 fn fast_random() -> u32 {
     static mut STATE: u32 = 0x12345678;
     unsafe {

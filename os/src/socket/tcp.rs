@@ -18,14 +18,18 @@ pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
-static NEXT_ISS: AtomicU32 = AtomicU32::new(0x4000_0000);
-static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(40000);
+static NEXT_ISS: AtomicU32 = AtomicU32::new(0);
+static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(0);
+const EPHEMERAL_PORT_FIRST: u16 = 49152;
+const EPHEMERAL_PORT_COUNT: u16 = 16384;
 const TCP_CONNECT_TIMEOUT_US: usize = 10_000_000;
 const TCP_INITIAL_RTO_US: usize = 500_000;
 const TCP_MAX_RTO_US: usize = 8_000_000;
 const TCP_MAX_RETRIES: u8 = 8;
 const TCP_MAX_RETRANSMIT_SEGMENTS: usize = 128;
 const TCP_SEND_WINDOW_SEGMENTS: usize = 48;
+/// 接收端允许缓存的最大乱序 TCP 段数。
+pub const TCP_MAX_OUT_OF_ORDER_SEGMENTS: usize = 32;
 const TCP_SEND_WINDOW_TIMEOUT_US: usize = 30_000_000;
 const TCP_RECENT_LISTENER_CLOSE_GRACE_US: usize = 2_000_000;
 
@@ -68,6 +72,7 @@ pub struct RetransmitSegment {
     last_sent_us: usize,
     rto_us: usize,
     retries: u8,
+    needs_retransmit: bool,
 }
 
 impl RetransmitSegment {
@@ -113,7 +118,7 @@ impl TcpSocket {
             local_addr: None,
             remote_addr: None,
             state: TcpSocketState::Open,
-            send_seq: NEXT_ISS.fetch_add(0x1000, Ordering::Relaxed),
+            send_seq: alloc_initial_sequence(),
             recv_seq: 0,
             receive_queue: Mutex::new(VecDeque::new()),
             out_of_order_queue: Mutex::new(VecDeque::new()),
@@ -272,6 +277,7 @@ impl TcpSocket {
             last_sent_us: crate::timer::get_time_us(),
             rto_us: TCP_INITIAL_RTO_US,
             retries: 0,
+            needs_retransmit: false,
         });
     }
 
@@ -307,26 +313,32 @@ impl TcpSocket {
         {
             let mut queue = self.retransmit_queue.lock();
             for seg in queue.iter_mut() {
-                if now_us.saturating_sub(seg.last_sent_us) < seg.rto_us {
+                let forced_by_pmtu = seg.needs_retransmit;
+                if !forced_by_pmtu && now_us.saturating_sub(seg.last_sent_us) < seg.rto_us {
                     continue;
                 }
-                if seg.retries >= TCP_MAX_RETRIES {
+                if !forced_by_pmtu && seg.retries >= TCP_MAX_RETRIES {
                     timed_out = true;
                     break;
                 }
+                seg.needs_retransmit = false;
                 seg.last_sent_us = now_us;
-                seg.retries = seg.retries.saturating_add(1);
-                seg.rto_us = core::cmp::min(seg.rto_us.saturating_mul(2), TCP_MAX_RTO_US);
-                pending.push(PendingRetransmit {
+                if forced_by_pmtu {
+                    seg.retries = 0;
+                    seg.rto_us = TCP_INITIAL_RTO_US;
+                } else {
+                    seg.retries = seg.retries.saturating_add(1);
+                    seg.rto_us = core::cmp::min(seg.rto_us.saturating_mul(2), TCP_MAX_RTO_US);
+                }
+                append_retransmit_chunks(
+                    &mut pending,
                     local_ip,
                     local_port,
                     remote_ip,
                     remote_port,
-                    seq: seg.seq,
-                    ack: seg.ack,
-                    flags: seg.flags,
-                    payload: seg.payload.clone(),
-                });
+                    seg,
+                    tcp_mss_for_dst(remote_ip),
+                );
             }
         }
 
@@ -353,7 +365,6 @@ impl TcpSocket {
     }
 
     fn insert_out_of_order(&mut self, seq: u32, payload: Vec<u8>, src_ip: u32, src_port: u16) {
-        const MAX_OUT_OF_ORDER_SEGMENTS: usize = 32;
         if payload.is_empty() {
             return;
         }
@@ -364,7 +375,7 @@ impl TcpSocket {
         {
             return;
         }
-        if queue.len() >= MAX_OUT_OF_ORDER_SEGMENTS {
+        if queue.len() >= TCP_MAX_OUT_OF_ORDER_SEGMENTS {
             return;
         }
         let segment = OutOfOrderSegment {
@@ -489,8 +500,52 @@ impl TcpSocket {
     }
 }
 
+fn tcp_boot_entropy() -> u64 {
+    let realtime = crate::timer::realtime_ns();
+    let mut value =
+        (crate::timer::get_time() as u64) ^ (realtime as u64) ^ ((realtime >> 64) as u64);
+    // SplitMix64 finalizer: enough to avoid deterministic identifiers across
+    // warm boots, but not intended as a cryptographic random-number source.
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn alloc_initial_sequence() -> u32 {
+    if NEXT_ISS.load(Ordering::Relaxed) == 0 {
+        let candidate = (tcp_boot_entropy() as u32) | 1;
+        let _ = NEXT_ISS.compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed);
+    }
+    NEXT_ISS.fetch_add(0x1_0000, Ordering::Relaxed)
+}
+
 fn alloc_ephemeral_port() -> u16 {
-    NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed)
+    loop {
+        let current = NEXT_EPHEMERAL_PORT.load(Ordering::Relaxed);
+        if current == 0 {
+            let offset = (tcp_boot_entropy() % EPHEMERAL_PORT_COUNT as u64) as u16;
+            let candidate = EPHEMERAL_PORT_FIRST + offset;
+            if NEXT_EPHEMERAL_PORT
+                .compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+            {
+                continue;
+            }
+            continue;
+        }
+
+        let next = if current == u16::MAX {
+            EPHEMERAL_PORT_FIRST
+        } else {
+            current + 1
+        };
+        if NEXT_EPHEMERAL_PORT
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
 }
 
 fn seq_before(a: u32, b: u32) -> bool {
@@ -511,6 +566,63 @@ fn segment_end_seq(seq: u32, flags: u8, payload_len: usize) -> u32 {
     let syn_fin = ((flags & crate::net::tcp::TCP_FLAG_SYN != 0) as u32)
         + ((flags & crate::net::tcp::TCP_FLAG_FIN != 0) as u32);
     seq.wrapping_add(payload_len as u32).wrapping_add(syn_fin)
+}
+
+fn append_retransmit_chunks(
+    pending: &mut Vec<PendingRetransmit>,
+    local_ip: u32,
+    local_port: u16,
+    remote_ip: u32,
+    remote_port: u16,
+    seg: &RetransmitSegment,
+    mss: usize,
+) {
+    let mss = mss.max(1);
+    if seg.payload.len() <= mss {
+        pending.push(PendingRetransmit {
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port,
+            seq: seg.seq,
+            ack: seg.ack,
+            flags: seg.flags,
+            payload: seg.payload.clone(),
+        });
+        return;
+    }
+
+    let syn_advance = ((seg.flags & crate::net::tcp::TCP_FLAG_SYN) != 0) as u32;
+    let mut offset = 0usize;
+    while offset < seg.payload.len() {
+        let end = core::cmp::min(offset + mss, seg.payload.len());
+        let first = offset == 0;
+        let last = end == seg.payload.len();
+        let mut flags = seg.flags;
+        if !first {
+            flags &= !crate::net::tcp::TCP_FLAG_SYN;
+        }
+        if !last {
+            flags &= !(crate::net::tcp::TCP_FLAG_FIN | crate::net::tcp::TCP_FLAG_PSH);
+        }
+        pending.push(PendingRetransmit {
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port,
+            seq: if first {
+                seg.seq
+            } else {
+                seg.seq
+                    .wrapping_add(syn_advance)
+                    .wrapping_add(offset as u32)
+            },
+            ack: seg.ack,
+            flags,
+            payload: seg.payload[offset..end].to_vec(),
+        });
+        offset = end;
+    }
 }
 
 fn register_listener(listener: Arc<Mutex<TcpSocket>>) -> Result<(), &'static str> {
@@ -616,6 +728,27 @@ fn find_connection(
         .map(|(_, sock)| sock.clone())
 }
 
+/// 收到可信 PMTU 反馈后，让对应连接按新的 MSS 立即重传受影响的在途数据。
+pub fn handle_pmtu_update(
+    local_ip: u32,
+    local_port: u16,
+    remote_ip: u32,
+    remote_port: u16,
+    quoted_seq: u32,
+    new_mss: usize,
+) {
+    let Some(socket) = find_connection(remote_ip, remote_port, local_ip, local_port) else {
+        return;
+    };
+    let socket = socket.lock();
+    let mut queue = socket.retransmit_queue.lock();
+    for seg in queue.iter_mut() {
+        if seg.seq == quoted_seq || seg.payload.len() > new_mss {
+            seg.needs_retransmit = true;
+        }
+    }
+}
+
 fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
     LISTENERS
         .lock()
@@ -637,6 +770,7 @@ pub fn send_tracked(socket: Arc<Mutex<TcpSocket>>, data: &[u8]) -> SysResult<usi
     }
 
     let mut sent_total = 0usize;
+    let mut segments_since_poll = 0usize;
     while sent_total < data.len() {
         wait_for_send_window(&socket)?;
         let (local_ip, local_port, remote_ip, remote_port, seq, ack, flags, take) = {
@@ -694,8 +828,10 @@ pub fn send_tracked(socket: Arc<Mutex<TcpSocket>>, data: &[u8]) -> SysResult<usi
         }
 
         sent_total += take;
-        if sent_total % (TCP_SEND_WINDOW_SEGMENTS * crate::net::tcp::TCP_MSS) == 0 {
+        segments_since_poll += 1;
+        if segments_since_poll >= TCP_SEND_WINDOW_SEGMENTS {
             crate::net::poll_rx_all();
+            segments_since_poll = 0;
         }
     }
 

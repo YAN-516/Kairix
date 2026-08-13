@@ -15,11 +15,16 @@ use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
 
 const GMAC_PHYS: usize = 0x1603_0000;
+/// 系统时钟/复位控制器基址。
 const SYS_CRG_PHYS: usize = 0x1302_0000;
+/// always-on 时钟/复位控制器基址。
 const AON_CRG_PHYS: usize = 0x1700_0000;
+/// always-on syscon 基址。
 const AON_SYSCON_PHYS: usize = 0x1701_0000;
+/// StarFive ccache 控制器基址，用于手动 flush cache line。
 const CCACHE_PHYS: usize = 0x0201_0000;
 
+// GMAC core/MTL/DMA register offsets.
 const GMAC_CONFIG: usize = 0x0000;
 const GMAC_PACKET_FILTER: usize = 0x0008;
 const GMAC_VERSION: usize = 0x0110;
@@ -55,6 +60,7 @@ const DMA_CHAN_CUR_RX_DESC: usize = 0x114c;
 const DMA_CHAN_STATUS: usize = 0x1160;
 const MTL_TXQ0_DEBUG: usize = 0x0d08;
 
+// GMAC_CONFIG bit definitions.
 const GMAC_CONFIG_PS: u32 = 1 << 15;
 const GMAC_CONFIG_FES: u32 = 1 << 14;
 const GMAC_CONFIG_DM: u32 = 1 << 13;
@@ -66,6 +72,7 @@ const GMAC_CONFIG_TE: u32 = 1 << 1;
 const GMAC_CONFIG_RE: u32 = 1 << 0;
 const GMAC_CORE_INIT: u32 =
     GMAC_CONFIG_JD | GMAC_CONFIG_PS | GMAC_CONFIG_BE | GMAC_CONFIG_DCRS | GMAC_CONFIG_JE;
+// DMA control bit definitions.
 const DMA_SOFT_RESET: u32 = 1 << 0;
 const DMA_CONTROL_OSP: u32 = 1 << 4;
 const DMA_CONTROL_START: u32 = 1 << 0;
@@ -81,11 +88,13 @@ const DMA_SYS_BUS_BLEN128: u32 = 1 << 6;
 const DMA_SYS_BUS_BLEN256: u32 = 1 << 7;
 const DMA_SYS_BUS_FIXED_BURST: u32 = 1 << 0;
 
+// MTL queue configuration bits.
 const MTL_TX_QUEUE_ENABLE: u32 = 1 << 3;
 const MTL_TX_THRESHOLD_64: u32 = 1 << 4;
 const MTL_TX_QUEUE_SIZE_SHIFT: u32 = 16;
 const MTL_RX_QUEUE_SIZE_SHIFT: u32 = 20;
 
+// MDIO command fields.
 const MDIO_BUSY: u32 = 1 << 0;
 const MDIO_WRITE: u32 = 1 << 2;
 const MDIO_READ: u32 = 3 << 2;
@@ -93,6 +102,7 @@ const MDIO_CLOCK_DIV_102: u32 = 4 << 8;
 const MDIO_REG_SHIFT: u32 = 16;
 const MDIO_PHY_SHIFT: u32 = 21;
 
+// Standard MII/YT8531 PHY registers and bit definitions.
 const PHY_ADDR: u8 = 0;
 const MII_BMCR: u8 = 0;
 const MII_BMSR: u8 = 1;
@@ -126,6 +136,7 @@ const VF2_GMAC0_GE_TX_DELAY: u16 = 0xa;
 const VF2_GMAC0_RGMII_SW_DR: u16 = 0x3 << 4;
 const VF2_GMAC0_RGMII_RXC_DR: u16 = 0x6 << 13;
 
+// DMA descriptor status/control bits.
 const DESC_OWN: u32 = 1 << 31;
 const DESC_TX_FIRST: u32 = 1 << 29;
 const DESC_TX_LAST: u32 = 1 << 28;
@@ -148,6 +159,7 @@ const DESC_RX_BUF1_VALID: u32 = 1 << 24;
 const DESC_RX_ERROR: u32 = 1 << 15;
 const DESC_LEN_MASK: u32 = 0x7fff;
 
+// DMA ring and buffer sizing.
 const RX_RING_SIZE: usize = 64;
 const TX_RING_SIZE: usize = 4;
 const DMA_BUF_SIZE: usize = 2048;
@@ -164,6 +176,7 @@ const DMA_DESCRIPTOR_STRIDE: usize = CACHE_LINE_SIZE;
 const DMA_DESCRIPTOR_SKIP_WORDS: u32 =
     ((DMA_DESCRIPTOR_STRIDE - size_of::<DmaDesc>()) / AXI_BUS_WIDTH) as u32;
 
+/// TX status bits that are sticky and should be cleared before waking TX DMA。
 const DMA_STATUS_TX_MASK: u32 = (1 << 14) // abnormal interrupt summary
     | (1 << 12) // fatal bus error
     | (1 << 10) // early transmit interrupt
@@ -173,6 +186,7 @@ const DMA_STATUS_TX_MASK: u32 = (1 << 14) // abnormal interrupt summary
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// Synopsys enhanced DMA descriptor。
 struct DmaDesc {
     des0: u32,
     des1: u32,
@@ -181,22 +195,29 @@ struct DmaDesc {
 }
 
 #[repr(C, align(64))]
+/// 一个 cache-line 对齐的 descriptor slot。
+///
+/// DWMAC 支持 descriptor skip length，这里把每个 descriptor 扩展到 64 字节，
+/// 降低 cache line 共享带来的同步风险。
 struct DmaDescSlot {
     desc: DmaDesc,
     padding: [u8; DMA_DESCRIPTOR_STRIDE - size_of::<DmaDesc>()],
 }
 
 #[repr(C, align(64))]
+/// 固定大小的 descriptor ring。
 struct DescriptorRing<const N: usize> {
     slots: [DmaDescSlot; N],
 }
 
 #[repr(C, align(64))]
+/// 固定大小的 DMA packet buffers。
 struct DmaBuffers<const N: usize> {
     bytes: [[u8; DMA_BUF_SIZE]; N],
 }
 
 #[repr(C, align(64))]
+/// DWMAC 使用的全部 DMA 内存。
 struct DmaMemory {
     rx_ring: DescriptorRing<RX_RING_SIZE>,
     tx_ring: DescriptorRing<TX_RING_SIZE>,
@@ -204,24 +225,38 @@ struct DmaMemory {
     tx_buffers: DmaBuffers<TX_RING_SIZE>,
 }
 
+/// 驱动运行态。
 struct DwmacState {
+    /// descriptor rings 和 packet buffers。
     dma: Box<DmaMemory>,
+    /// 下一次轮询的 RX descriptor 下标。
     rx_index: usize,
+    /// 下一次使用的 TX descriptor 下标。
     tx_index: usize,
+    /// 已提交的 TX 包计数，仅用于日志和诊断。
     tx_submitted: u64,
+    /// RX 丢包计数。
     rx_dropped: u64,
+    /// RX buffer unavailable 恢复次数。
     rx_rbu_recoveries: u64,
+    /// 上一次轮询 PHY 链路状态的 tick。
     last_link_poll: u64,
+    /// 当前链路是否 up。
     link_up: bool,
+    /// 当前链路速率/双工模式。
     link_mode: Option<LinkMode>,
 }
 
+/// PHY 报告的链路模式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LinkMode {
+    /// 链路速率，单位 Mbps。
     speed: u16,
+    /// 是否全双工。
     full_duplex: bool,
 }
 
+/// 防止 RX 轮询重入的 RAII guard。
 struct RxPollGuard<'a> {
     active: &'a AtomicBool,
 }
@@ -234,11 +269,17 @@ impl Drop for RxPollGuard<'_> {
 
 /// JH7110 GMAC0 network device.
 pub struct DwmacDevice {
+    /// 设备名。
     name: String,
+    /// MAC 地址。
     mac: [u8; 6],
+    /// IPv4 地址。
     ip: u32,
+    /// DMA ring、索引和链路状态。
     state: Mutex<DwmacState>,
+    /// RX 轮询重入保护。
     rx_polling: AtomicBool,
+    /// 上层协议栈注册的 RX handler。
     rx_handler: Mutex<Option<Arc<dyn Fn(Skb) + Send + Sync>>>,
 }
 
@@ -292,6 +333,7 @@ impl DwmacDevice {
         })
     }
 
+    /// 发送一个完整以太网帧。
     fn transmit(&self, skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         let payload = skb.data();
         if payload.len() > ETHERNET_MAX_FRAME {
@@ -400,6 +442,7 @@ impl DwmacDevice {
         Ok((skb, 0, 0))
     }
 
+    /// 定期读取 PHY 状态并按链路模式更新 MAC 配置。
     fn poll_link(&self, state: &mut DwmacState) {
         let now = polyhal::timer::get_ticks();
         let interval = polyhal::timer::get_freq().saturating_mul(LINK_POLL_INTERVAL_SECS);
@@ -457,6 +500,7 @@ impl DwmacDevice {
         state.link_up = true;
     }
 
+    /// 轮询 RX descriptor ring，把收到的帧交给上层 handler。
     fn poll_receive(&self) {
         if self
             .rx_polling
@@ -599,6 +643,7 @@ impl NetDevice for DwmacDevice {
     }
 }
 
+/// 打开 JH7110 GMAC0 所需时钟、复位和 RGMII pin/clock 配置。
 fn platform_enable() -> Result<(), &'static str> {
     const CLK_ENABLE: u32 = 1 << 31;
     const SYS_GMAC0_GTX: usize = 0x1b0;
@@ -706,6 +751,7 @@ fn platform_enable() -> Result<(), &'static str> {
     Err("GMAC0 reset did not deassert")
 }
 
+/// 复位 DWMAC DMA engine。
 fn dma_reset() -> Result<(), &'static str> {
     mmio_rmw(GMAC_PHYS, DMA_MODE, 0, DMA_SOFT_RESET);
     for _ in 0..1_000_000 {
@@ -717,6 +763,7 @@ fn dma_reset() -> Result<(), &'static str> {
     Err("DWMAC DMA reset timed out")
 }
 
+/// 初始化 YT8531 PHY，并套用 VisionFive 2 设备树中的 RGMII delay/drive 配置。
 fn phy_initialize() -> Result<u32, &'static str> {
     let phy_id = ((mdio_read(PHY_ADDR, MII_PHYSID1)? as u32) << 16)
         | mdio_read(PHY_ADDR, MII_PHYSID2)? as u32;
@@ -775,6 +822,7 @@ fn phy_initialize() -> Result<u32, &'static str> {
     Ok(phy_id)
 }
 
+/// 配置 MAC、MTL 队列和 DMA channel。
 fn configure_mac_dma(dma: &mut DmaMemory, mac: [u8; 6]) -> Result<(), &'static str> {
     let dma_va = dma as *mut DmaMemory as usize;
     if dma_va < VIRT_ADDR_START {
@@ -889,6 +937,7 @@ fn configure_mac_dma(dma: &mut DmaMemory, mac: [u8; 6]) -> Result<(), &'static s
     Ok(())
 }
 
+/// 初始化 RX/TX descriptor ring。
 fn initialize_descriptors(dma: &mut DmaMemory) -> Result<(), &'static str> {
     if size_of::<DmaDescSlot>() != DMA_DESCRIPTOR_STRIDE || DMA_DESCRIPTOR_SKIP_WORDS > 7 {
         return Err("DWMAC descriptor stride is not representable");
@@ -907,6 +956,7 @@ fn initialize_descriptors(dma: &mut DmaMemory) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// 根据 PHY 链路模式更新 MAC 速率和双工位。
 fn configure_mac_link(mode: LinkMode) -> Result<(), &'static str> {
     // The firmware-configured GTX clock is 125 MHz. Linux changes the
     // JH7110 clock-controller rate before selecting 100/10 Mbps. Kairix does
@@ -929,6 +979,7 @@ fn configure_mac_link(mode: LinkMode) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// 重新把一个 RX descriptor 交给 DMA。
 fn rearm_rx_descriptor(dma: &mut DmaMemory, index: usize) {
     let buffer_pa = virt_to_phys(dma.rx_buffers.bytes[index].as_ptr() as usize);
     let desc_ptr = &mut dma.rx_ring.slots[index].desc as *mut DmaDesc;
@@ -948,6 +999,7 @@ fn rearm_rx_descriptor(dma: &mut DmaMemory, index: usize) {
     dma_sync_range(desc_ptr.cast(), size_of::<DmaDesc>());
 }
 
+/// 分配 cache-line 对齐的 DMA 内存。
 fn alloc_dma_memory() -> Result<Box<DmaMemory>, &'static str> {
     let layout = Layout::from_size_align(size_of::<DmaMemory>(), align_of::<DmaMemory>())
         .map_err(|_| "invalid DWMAC DMA layout")?;
@@ -958,6 +1010,7 @@ fn alloc_dma_memory() -> Result<Box<DmaMemory>, &'static str> {
     Ok(unsafe { Box::from_raw(ptr) })
 }
 
+/// 从 MAC 地址寄存器读取 firmware 预置的 MAC。
 fn read_mac_address() -> Option<[u8; 6]> {
     let low = mmio_read(GMAC_PHYS, GMAC_ADDR_LOW0);
     let high = mmio_read(GMAC_PHYS, GMAC_ADDR_HIGH0);
@@ -978,16 +1031,19 @@ fn read_mac_address() -> Option<[u8; 6]> {
     }
 }
 
+/// 读取 YT8531 扩展寄存器。
 fn phy_ext_read(reg: u16) -> Result<u16, &'static str> {
     mdio_write(PHY_ADDR, MII_EXT_ADDR, reg)?;
     mdio_read(PHY_ADDR, MII_EXT_DATA)
 }
 
+/// 写入 YT8531 扩展寄存器。
 fn phy_ext_write(reg: u16, value: u16) -> Result<(), &'static str> {
     mdio_write(PHY_ADDR, MII_EXT_ADDR, reg)?;
     mdio_write(PHY_ADDR, MII_EXT_DATA, value)
 }
 
+/// 通过 MDIO 读取 PHY 寄存器。
 fn mdio_read(phy: u8, reg: u8) -> Result<u16, &'static str> {
     mdio_wait_idle()?;
     let command = ((phy as u32) << MDIO_PHY_SHIFT)
@@ -1000,6 +1056,7 @@ fn mdio_read(phy: u8, reg: u8) -> Result<u16, &'static str> {
     Ok(mmio_read(GMAC_PHYS, GMAC_MDIO_DATA) as u16)
 }
 
+/// 通过 MDIO 写入 PHY 寄存器。
 fn mdio_write(phy: u8, reg: u8, value: u16) -> Result<(), &'static str> {
     mdio_wait_idle()?;
     mmio_write(GMAC_PHYS, GMAC_MDIO_DATA, value as u32);
@@ -1012,6 +1069,7 @@ fn mdio_write(phy: u8, reg: u8, value: u16) -> Result<(), &'static str> {
     mdio_wait_idle()
 }
 
+/// 等待 MDIO 控制器空闲。
 fn mdio_wait_idle() -> Result<(), &'static str> {
     for _ in 0..100_000 {
         if mmio_read(GMAC_PHYS, GMAC_MDIO_ADDR) & MDIO_BUSY == 0 {
@@ -1022,6 +1080,7 @@ fn mdio_wait_idle() -> Result<(), &'static str> {
     Err("DWMAC MDIO transaction timed out")
 }
 
+/// 将内核直映虚拟地址转换为物理地址。
 #[inline]
 fn virt_to_phys(address: usize) -> u64 {
     if address >= VIRT_ADDR_START {
@@ -1031,6 +1090,10 @@ fn virt_to_phys(address: usize) -> u64 {
     }
 }
 
+/// 将指定内存范围同步给 DMA 设备可见。
+///
+/// JH7110 当前路径依赖显式 cache line flush，描述符和 packet buffer 在交给
+/// DMA 前后都通过该函数维护一致性。
 fn dma_sync_range(ptr: *const u8, len: usize) {
     if len == 0 {
         return;
@@ -1053,17 +1116,20 @@ fn dma_sync_range(ptr: *const u8, len: usize) {
     }
 }
 
+/// 读取 32 位 MMIO 寄存器。
 #[inline]
 fn mmio_read(base: usize, offset: usize) -> u32 {
     unsafe { read_volatile((base + offset + VIRT_ADDR_START) as *const u32) }
 }
 
+/// 写入 32 位 MMIO 寄存器。
 #[inline]
 fn mmio_write(base: usize, offset: usize, value: u32) {
     unsafe { write_volatile((base + offset + VIRT_ADDR_START) as *mut u32, value) }
     fence(Ordering::SeqCst);
 }
 
+/// 原子式读改写 MMIO 寄存器中的位域。
 #[inline]
 fn mmio_rmw(base: usize, offset: usize, clear: u32, set: u32) {
     let value = mmio_read(base, offset);

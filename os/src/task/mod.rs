@@ -68,12 +68,78 @@ static TIMER_QUEUE: SpinNoIrqLock<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> =
 #[cfg(target_arch = "loongarch64")]
 static LA64_BLOCK_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Repair an impossible exit request observed on the first entry of a freshly
+/// forked process leader.
+///
+/// A legitimate exec-driven task exit requires another thread in the same
+/// process, while a fatal signal first marks the PCB zombie.  Therefore a
+/// live, single-task process with no exec owner cannot validly have either TCB
+/// exit flag set.  The LS2K1000 exposes this stale state without the timing
+/// delay introduced by verbose serial diagnostics.
+#[cfg(target_arch = "loongarch64")]
+fn recover_stale_fork_leader_exit_state(task: &Arc<TaskControlBlock>) {
+    let (tid, task_zombie) = {
+        let inner = task.inner_exclusive_access();
+        (
+            inner.res.as_ref().map(|res| res.tid).unwrap_or(usize::MAX),
+            inner
+                .zombie_flag
+                .load(core::sync::atomic::Ordering::Acquire),
+        )
+    };
+    let exec_exit_requested = task.exec_exit_requested();
+    if tid != 0 || (!exec_exit_requested && !task_zombie) {
+        return;
+    }
+
+    let Some(process) = task.process.upgrade() else {
+        return;
+    };
+    let recoverable = {
+        let inner = process.inner_exclusive_access();
+        let mut live_tasks = inner.tasks.iter().flatten();
+        let only_task_is_current = live_tasks
+            .next()
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, task))
+            && live_tasks.next().is_none();
+        !inner.is_zombie
+            && !inner.is_stopped
+            && inner.alive_thread_count == 1
+            && inner.exec_owner_tid.is_none()
+            && only_task_is_current
+    };
+    if !recoverable {
+        return;
+    }
+
+    let mut inner = task.inner_exclusive_access();
+    let stale_exec = task.exec_exit_requested();
+    let stale_zombie = inner
+        .zombie_flag
+        .load(core::sync::atomic::Ordering::Acquire);
+    if !stale_exec && !stale_zombie {
+        return;
+    }
+    task.clear_exec_exit_request();
+    inner
+        .zombie_flag
+        .store(false, core::sync::atomic::Ordering::Release);
+    inner.exit_code = None;
+    inner.interrupted_by_signal = false;
+    error!(
+        "[FORK_LEADER_STALE_EXIT_RECOVERED] pid={} global_tid={} exec_exit={} task_zombie={}",
+        process.getpid(),
+        inner.global_tid,
+        stale_exec,
+        stale_zombie
+    );
+}
+
 lazy_static! {
     static ref DEFERRED_EXITED_TASKS: SpinNoIrqLock<Vec<DeferredExitedTask>> =
         SpinNoIrqLock::new(Vec::new());
-    static ref DEFERRED_PROCESS_USER_SPACES: SpinNoIrqLock<
-        VecDeque<process::ExitedProcessUserSpace>,
-    > = SpinNoIrqLock::new(VecDeque::new());
+    static ref DEFERRED_PROCESS_USER_SPACES: SpinNoIrqLock<VecDeque<process::ExitedProcessUserSpace>> =
+        SpinNoIrqLock::new(VecDeque::new());
 }
 
 const EXIT_MM_RELEASE_BUDGET: usize = 64;
@@ -641,6 +707,8 @@ fn task_entry() {
             .unwrap()
             .vm_exclusive_access()
             .activate();
+        #[cfg(target_arch = "loongarch64")]
+        recover_stale_fork_leader_exit_state(&current_task);
         current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame
     };
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
@@ -655,11 +723,15 @@ fn task_entry() {
             .as_ref()
             .is_some_and(|task| task.exec_exit_requested())
         {
+            #[cfg(target_arch = "loongarch64")]
+            warn!("[la64 task-entry-exit] reason=exec_exit_requested");
             exit_current_and_run_next(0);
             continue;
         }
         let process = current.and_then(|task| task.process.upgrade());
         let Some(process) = process else {
+            #[cfg(target_arch = "loongarch64")]
+            warn!("[la64 task-entry-exit] reason=process_missing");
             exit_current_and_run_next(0);
             continue;
         };
@@ -676,6 +748,11 @@ fn task_entry() {
         };
         drop(process);
         if is_zombie {
+            #[cfg(target_arch = "loongarch64")]
+            warn!(
+                "[la64 task-entry-exit] reason=process_zombie exit_code={}",
+                exit_code
+            );
             exit_current_and_run_next(exit_code);
             continue;
         }
@@ -1125,8 +1202,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     );
     #[cfg(target_arch = "loongarch64")]
     warn!(
-        "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={}",
-        pid_for_log, tid, global_tid, exit_code
+        "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={} exec_exit_requested={}",
+        pid_for_log, tid, global_tid, exit_code, exec_exit_requested
     );
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
@@ -1149,13 +1226,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             .try_inner_exclusive_access()
             .map(|inner| inner.is_zombie)
     });
-    if task_zombie_for_log || process_zombie_for_log == Some(true) {
+    if task_zombie_for_log && process_zombie_for_log != Some(true) {
         error!(
-            "[TASK_EXIT_FATAL] pid={:?} tid={} global_tid={} exit_code={} task_status={:?} task_zombie={} process_zombie={:?}",
+            "[TASK_EXIT_STATE_MISMATCH] pid={:?} tid={} global_tid={} exit_code={} exec_exit_requested={} task_status={:?} task_zombie={} process_zombie={:?}",
             pid_for_log,
             tid,
             global_tid,
             exit_code,
+            exec_exit_requested,
             task_status_for_log,
             task_zombie_for_log,
             process_zombie_for_log,
@@ -1247,7 +1325,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     crate::syscall::futex::remove_task_from_futex_table(&task);
     crate::task::processor::record_exit_cleanup_phase(5, exit_pid, exit_tid);
     #[cfg(target_arch = "loongarch64")]
-    log::debug!("[la64 exit] exit_current after task cleanup pid={:?}", pid_for_log);
+    log::debug!(
+        "[la64 exit] exit_current after task cleanup pid={:?}",
+        pid_for_log
+    );
 
     // Keep the TCB marked as a zombie while exit cleanup decides whether this
     // is a detached task or a joinable thread retained for waittid.
@@ -1453,10 +1534,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         #[cfg(target_arch = "loongarch64")]
         warn!(
             "[la64 exit] pid={} should_wake_parent={} is_zombie={} alive_thread_count={}",
-            pid,
-            should_wake_parent,
-            process_inner.is_zombie,
-            process_inner.alive_thread_count
+            pid, should_wake_parent, process_inner.is_zombie, process_inner.alive_thread_count
         );
         drop(process_inner);
         crate::task::processor::record_exit_cleanup_phase(14, exit_pid, exit_tid);
@@ -1468,8 +1546,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         if should_wake_parent {
             crate::task::processor::record_exit_cleanup_phase(15, exit_pid, exit_tid);
             process.close_all_files_on_exit_with_tlb_progress();
-            deferred_process_user_space =
-                process.detach_user_space_on_exit_with_tlb_progress();
+            deferred_process_user_space = process.detach_user_space_on_exit_with_tlb_progress();
             crate::task::processor::record_exit_cleanup_phase(16, exit_pid, exit_tid);
             crate::task::processor::record_exit_cleanup_phase(17, exit_pid, exit_tid);
             let (parent_weak, vfork_parent_task) = {
@@ -1610,7 +1687,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         drop(task);
     }
     #[cfg(target_arch = "loongarch64")]
-    log::debug!("[la64 exit] exit_current before schedule exit_code={}", exit_code);
+    log::debug!(
+        "[la64 exit] exit_current before schedule exit_code={}",
+        exit_code
+    );
     info!("exit_current_and_run_next exit_code={}", exit_code);
     crate::task::processor::record_exit_cleanup_phase(21, exit_pid, exit_tid);
     // we do not have to save task context
@@ -1634,7 +1714,41 @@ lazy_static! {
 }
 #[allow(missing_docs)]
 pub fn add_initproc() {
-    let _initproc = INITPROC.clone();
+    let initproc = INITPROC.clone();
+    // `ProcessControlBlock::new` enqueues the leader while constructing the
+    // lazy static.  Before processor_start no scheduler is running, so repair
+    // a stale queue-ownership marker by removing and re-enqueuing this one
+    // bootstrap task.  Without this, an empty physical queue can leave CPU 0
+    // idling forever after "ADD INITPROC" on LS2K1000.
+    let init_task = initproc
+        .inner_exclusive_access()
+        .tasks
+        .iter()
+        .flatten()
+        .next()
+        .cloned();
+    if let Some(task) = init_task {
+        let on_cpu_before = task.is_on_cpu();
+        // A just-created PID 1 has no execution history, and no scheduler is
+        // active yet.  Restore the constructor's invariant unconditionally
+        // before the first enqueue.  In particular, do not read task_status
+        // first: the LS2K1000 failure can leave an invalid enum discriminant,
+        // for which even Debug formatting is undefined behavior.
+        {
+            let mut inner = task.inner_exclusive_access();
+            inner.task_status = TaskStatus::Ready;
+            inner
+                .zombie_flag
+                .store(false, core::sync::atomic::Ordering::Release);
+            inner.exit_code = None;
+            inner.interrupted_by_signal = false;
+        }
+        task.clear_exec_exit_request();
+        if !on_cpu_before {
+            remove_task(Arc::clone(&task));
+            add_task(Arc::clone(&task));
+        }
+    }
 }
 #[allow(missing_docs)]
 pub fn remove_inactive_task(task: Arc<TaskControlBlock>) {

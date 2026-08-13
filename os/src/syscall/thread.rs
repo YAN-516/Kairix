@@ -207,7 +207,10 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     };
 
     #[cfg(target_arch = "loongarch64")]
-    debug!("[la64 exit] exit_group close files pid={}", process.getpid());
+    debug!(
+        "[la64 exit] exit_group close files pid={}",
+        process.getpid()
+    );
     process.close_all_files_on_exit();
     #[cfg(target_arch = "loongarch64")]
     debug!(
@@ -215,26 +218,33 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         process.getpid()
     );
 
-    // 2. 释放 process 锁后，再处理每个线程的 zombie_flag 和唤醒
+    // 2. 释放 process 锁后，再处理每个线程的 zombie_flag 和唤醒。
+    //
+    // Do not first sample `task_status == Blocked` and only then wake.  A
+    // sibling can pass that sample while it is still Running, enter futex
+    // sleep immediately afterwards, and miss the group-exit notification
+    // forever.  This is exposed by rustc's short-lived worker thread on the
+    // LS2K1000 when serial logging is disabled.  wakeup_task() already
+    // handles both Running and Blocked tasks: for a running task it records a
+    // pending wakeup, which block_current_and_run_next_impl consumes before
+    // sleeping.
     for t in other_tasks {
-        let should_wake = {
+        {
             let t_inner = t.inner_exclusive_access();
             t_inner
                 .zombie_flag
                 .store(true, core::sync::atomic::Ordering::SeqCst);
-            let is_blocked = t_inner.task_status == crate::task::TaskStatus::Blocked;
-            drop(t_inner);
-            is_blocked
-        };
-        if should_wake {
-            crate::task::wakeup_task(t);
         }
+        crate::task::wakeup_task(t);
     }
 
     drop(process);
     drop(task);
     #[cfg(target_arch = "loongarch64")]
-    debug!("[la64 exit] exit_group call exit_current code={}", exit_code);
+    debug!(
+        "[la64 exit] exit_group call exit_current code={}",
+        exit_code
+    );
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
 }

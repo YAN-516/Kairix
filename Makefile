@@ -9,11 +9,11 @@ AUTO_TEST ?= final
 RV_CPU ?= $(or $(CPU),8)
 RV_MEM ?= $(or $(MEM),8G)
 LA_CPU ?= $(or $(CPU),12)
-LA_MEM ?= $(or $(MEM),8G)
+LA_MEM ?= $(or $(MEM),36G)
 FILE_RV ?= sdcard-rv.img
 FILE_LA ?= sdcard-la.img
 UIMAGE_REF ?= uImage
-UIMAGE_OUT ?= kairix-uImage
+UIMAGE_OUT ?= kairix-uimage
 BOARD_INITRD_MAX ?= 268435456
 BOARD_ROOTFS_IMG ?= kairix-2k1000-rootfs.img
 BOARD_ROOTFS_SIZE ?= 120M
@@ -103,7 +103,7 @@ lkernel_board_sata:
 	@test -f "$(LA_SDCARD_IMG)" || (echo "Error: SATA rootfs image not found: $(LA_SDCARD_IMG)" >&2; exit 1)
 	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 LOG=$(LOG) build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 AUTO_TEST=0 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
+	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 AUTO_TEST=$(AUTO_TEST) SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
 	python3 tools/wrap-uimage.py --ref "$(abspath $(UIMAGE_REF))" --kernel "$(abspath os/target/loongarch64-unknown-none/release/os.bin)" --out "$(abspath $(UIMAGE_OUT))"
 	@echo "2k1000 SATA artifacts:"
 	@echo "  kernel: $(abspath $(UIMAGE_OUT)) -> USB /install/uImage"

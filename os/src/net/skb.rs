@@ -1,9 +1,17 @@
+//! 网络栈内部使用的 socket buffer。
+//!
+//! `Skb` 保存一段连续缓冲区，并通过 `data_start..data_end` 标记当前有效
+//! 数据。协议栈收包时逐层 `pull` 剥离头部，发包时逐层 `push` 添加头部。
+
 use crate::net::device::NetDevice;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 #[allow(unused)]
-/// 网络数据包缓冲区
+/// 网络数据包缓冲区。
+///
+/// 这个结构借鉴 Linux skb 的“头部空间 + 有效数据 + 尾部空间”模型，
+/// 让协议头追加和剥离都可以只移动偏移，而不必频繁搬移整包数据。
 pub struct Skb {
     /// 数据缓冲区（连续内存）
     pub data: Vec<u8>,
@@ -16,7 +24,9 @@ pub struct Skb {
 }
 #[allow(unused)]
 impl Skb {
-    /// 创建新的空 skb，预留指定大小的缓冲区
+    /// 创建新的空 skb，预留指定大小的缓冲区。
+    ///
+    /// 初始时有效数据长度为 0，`capacity` 只作为尾部可写空间。
     pub fn new(capacity: usize) -> Self {
         let mut data = Vec::with_capacity(capacity);
         data.resize(capacity, 0);
@@ -30,6 +40,8 @@ impl Skb {
     }
 
     /// 创建带有头部预留空间的 skb。
+    ///
+    /// 发包路径通常先放 payload，再由 TCP/IP/以太网逐层向前 `push` 头部。
     pub fn with_headroom(headroom: usize, capacity: usize) -> Self {
         let mut data = Vec::with_capacity(headroom + capacity);
         data.resize(headroom + capacity, 0);
@@ -62,8 +74,10 @@ impl Skb {
         self.data.len() - self.data_end
     }
 
-    /// 预留头部空间
-    /// 确保在数据前面至少有 `size` 字节的空闲空间
+    /// 预留头部空间。
+    ///
+    /// 确保当前有效数据前至少有 `size` 字节空闲；空间不足时会重新分配并
+    /// 把有效数据整体后移。
     pub fn reserve_head(&mut self, size: usize) {
         if size <= self.headroom() {
             return; // 空间足够
@@ -96,7 +110,9 @@ impl Skb {
         // data_end 不变，只是缓冲区变大了
     }
 
-    /// 在头部添加数据（添加协议头）
+    /// 在头部添加数据（添加协议头）。
+    ///
+    /// 返回新增出来的可写头部切片，调用者可直接填充协议头结构。
     pub fn push(&mut self, size: usize) -> Option<&mut [u8]> {
         if size > self.headroom() {
             // 尝试预留空间
@@ -112,7 +128,9 @@ impl Skb {
         Some(&mut self.data[start..end])
     }
 
-    /// 在尾部添加数据（添加负载）
+    /// 在尾部添加数据（添加负载）。
+    ///
+    /// 返回新增出来的可写尾部切片。
     pub fn put(&mut self, size: usize) -> Option<&mut [u8]> {
         if size > self.tailroom() {
             self.reserve_tail(size);
@@ -126,7 +144,9 @@ impl Skb {
         Some(&mut self.data[start..self.data_end])
     }
 
-    /// 从头部移除数据（剥离协议头）
+    /// 从头部移除数据（剥离协议头）。
+    ///
+    /// 返回被移除的头部切片，常用于接收路径读取当前协议头。
     pub fn pull(&mut self, size: usize) -> Option<&[u8]> {
         if size > self.len() {
             return None;
@@ -138,7 +158,9 @@ impl Skb {
         Some(&self.data[start..self.data_start])
     }
 
-    /// 从尾部移除数据
+    /// 从尾部移除数据。
+    ///
+    /// 接收路径会用它丢弃网卡填充、FCS 或上层长度之外的尾部数据。
     pub fn trim(&mut self, size: usize) -> Option<&[u8]> {
         if size > self.len() {
             return None;

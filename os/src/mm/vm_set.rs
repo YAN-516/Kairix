@@ -53,7 +53,53 @@ use polyhal::{consts::*, hart_id};
 use crate::Signal;
 use crate::current_process;
 pub use polyhal::pagetable::*;
+
+#[cfg(target_arch = "loongarch64")]
+use loongArch64::register::{
+    asid, pgdh, pgdl, pwch, pwcl, stlbps, tlbehi, tlbelo0, tlbelo1, tlbidx, tlbrehi,
+};
+
+// Temporary LS2K1000 diagnostic: rustc first touches anonymous MAP_NORESERVE
+// pages immediately after loading its large driver library.  Log the initial
+// faults completely, then sample progress so a board-side stall can be
+// distinguished from a slow demand-paged dynamic load without serial flooding.
+#[cfg(target_arch = "loongarch64")]
+static LA64_RUSTC_ANON_FAULT_TRACE: AtomicUsize = AtomicUsize::new(0);
 pub use polyhal::utils::addr::*;
+
+/// Install the paired 4 KiB TLB leaf entries directly from the software page
+/// table.  This is used only as a recovery path for an already-present PTE on
+/// LS2K1000: the board can otherwise refill an empty TLB entry from a valid
+/// leaf PTE and immediately raise the same load fault again.
+#[cfg(target_arch = "loongarch64")]
+#[inline]
+fn la64_refill_present_tlb_pair(page_table: &PageTable, fault_vpn: VirtPageNum) {
+    let even_vpn = VirtPageNum(fault_vpn.0 & !1);
+    let odd_vpn = VirtPageNum(even_vpn.0 + 1);
+    let elo0 = page_table.translate(even_vpn).map(|pte| pte.0).unwrap_or(0);
+    let elo1 = page_table.translate(odd_vpn).map(|pte| pte.0).unwrap_or(0);
+    let pair_addr = even_vpn.0 << PAGE_SIZE_BITS;
+    // TLBIDX.PS occupies bits [29:24].  NE is meaningful for TLBRD/TLBSRCH,
+    // not for a new fill, so clear it rather than carrying a failed search
+    // result into this architectural write.
+    let tlbidx_raw = tlbidx::read().raw() & !((0x3fusize << 24) | (1usize << 31));
+    let tlbidx_ps_4k = tlbidx_raw | (12usize << 24);
+    unsafe {
+        core::arch::asm!(
+            "dbar 0",
+            "csrwr {pair_addr}, 0x11",
+            "csrwr {elo0}, 0x12",
+            "csrwr {elo1}, 0x13",
+            "csrwr {tlbidx}, 0x10",
+            "tlbfill",
+            "dbar 0",
+            pair_addr = in(reg) pair_addr,
+            elo0 = in(reg) elo0,
+            elo1 = in(reg) elo1,
+            tlbidx = in(reg) tlbidx_ps_4k,
+        );
+    }
+}
 
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
@@ -798,6 +844,23 @@ impl SetPageFaultException for UserVMSet {
         va: VirtAddr,
         access: AccessType,
     ) -> Option<PageFaultError> {
+        #[cfg(target_arch = "loongarch64")]
+        let rustc_fault_sequence = current_task()
+            .is_some_and(|task| task.process_id() == 3)
+            .then(|| LA64_RUSTC_ANON_FAULT_TRACE.fetch_add(1, Ordering::Relaxed) + 1);
+        #[cfg(target_arch = "loongarch64")]
+        let rustc_trace = rustc_fault_sequence.is_some_and(|sequence| {
+            sequence <= 64 || sequence.is_power_of_two() || sequence % 4096 == 0
+        });
+        #[cfg(target_arch = "loongarch64")]
+        if rustc_trace {
+            error!(
+                "[RUSTC_PF] seq={} enter va={:#x} access={:?}",
+                rustc_fault_sequence.unwrap_or(0),
+                va.0,
+                access
+            );
+        }
         // warn!("unalloc handler");
         // info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
         let area_index = self.find_area_index(va)?;
@@ -850,10 +913,37 @@ impl SetPageFaultException for UserVMSet {
                         *pte = PTE::new(ppn, new_flags);
                     }
                 }
+                #[cfg(target_arch = "loongarch64")]
+                {
+                    // LoongArch reports the address of a cross-page unaligned
+                    // load in BADV.  A load at (page_end - 2), for example,
+                    // may already have a valid PTE for this page while the
+                    // refill hardware is requesting the following page.  The
+                    // LS2K1000 exposes that strictly whereas QEMU commonly
+                    // completes the access without a second visible fault.
+                    // Resolve the adjacent page before retrying the original
+                    // instruction.  32 bytes covers LASX-width accesses.
+                    if va.page_offset() > PAGE_SIZE - 32 {
+                        let next_va = VirtAddr::from((fault_vpn.0 + 1) * PAGE_SIZE);
+                        if self.find_area(next_va).is_some() {
+                            let _ = self.handle_unalloc_page_fault(next_va, access);
+                        }
+                    }
+                }
                 // A fault with a valid, permitted PTE means this CPU can still
                 // hold an older invalid or restrictive translation. Invalidate
                 // it before reporting progress, or the same instruction can
                 // fault forever while this path repeatedly returns Normal.
+                // A present user PTE must not fault.  The 2K1000 has shown a
+                // stale translation surviving the address+ASID invalidation
+                // above, so retain a full local invalidation as a correctness
+                // fallback only on this exceptional retry path.
+                #[cfg(target_arch = "loongarch64")]
+                {
+                    TLB::flush_all();
+                    la64_refill_present_tlb_pair(&self.page_table, fault_vpn);
+                }
+                #[cfg(not(target_arch = "loongarch64"))]
                 TLB::flush_vaddr(va);
                 return Some(PageFaultError::Normal);
             }
@@ -1091,6 +1181,17 @@ impl SetPageFaultException for UserVMSet {
                     tlb_ns,
                 );
             }
+        }
+        #[cfg(target_arch = "loongarch64")]
+        if rustc_trace {
+            error!(
+                "[RUSTC_PF] seq={} mapped va={:#x} vpn={:#x} ppn={:#x} flags={:?}",
+                rustc_fault_sequence.unwrap_or(0),
+                va.0,
+                fault_vpn.0,
+                target_ppn.0,
+                mappingflags
+            );
         }
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(PageFaultError::Normal)
