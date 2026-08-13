@@ -50,7 +50,7 @@ use polyhal_trap::trapframe::*;
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
     CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
-    RLIMIT_NOFILE, Rlimit64, TermStatus, Tms,
+    RLIMIT_NOFILE, RLIMIT_STACK, Rlimit64, TermStatus, Tms,
 };
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,

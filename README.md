@@ -6,7 +6,7 @@
 
 ## 完成情况
 ### 决赛
-截止8月10日15时55分，Kairix已通过决赛大部分测试点，并在排行榜上位于前列：
+截止8月11日20时36分，Kairix已通过决赛大部分测试点，并在排行榜上位于前列：
 
 ![决赛排行榜](./docs/决赛排行榜.png)
 
@@ -30,8 +30,12 @@
 ![整体架构](./docs/整体架构图.svg)
 ### 项目文档
 - [初赛文档](./Unicus初赛文档.pdf)
-- [决赛演示视频](https://pan.baidu.com/s/1w4IjYoZliJ-LIrdoPlzNHQ?pwd=9r5t):提取码：9r5t
 - [初赛PPT](./Unicus初赛PPT.pptx)
+
+- [决赛演示视频](https://pan.baidu.com/s/1w4IjYoZliJ-LIrdoPlzNHQ?pwd=9r5t):提取码：9r5t
+- [决赛文档](./Unicus决赛文档.pdf)
+- [决赛PPT](./Unicus决赛PPT.pptx)
+- [决赛线上阶段加速文档](./Unicus决赛线上阶段加速文档.pdf)
 ## 运行方式
 
 进入docker之后
@@ -46,7 +50,7 @@
 
 `AUTO_TEST` 控制启动后的脚本执行模式：
 
-- `final`：默认值，依次执行 `/musl/buildstorm_testcode.sh` 和 `/glibc/cagent_testcode.sh`，完成后关机。
+- `final`：默认值，依次执行 `/glibc/cagent_testcode.sh` 和 `/glibc/buildstorm_2_testcode.sh`，完成后关机。
 - `preliminary`：执行原有初赛测试脚本列表，完成后关机。
 - `off`：不执行测试脚本，进入交互终端。
 

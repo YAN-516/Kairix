@@ -142,6 +142,15 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         }
     }
 
+    /// Return mutable access without locking when the mutex itself is uniquely
+    /// borrowed. The exclusive `&mut self` proves that no guard or competing
+    /// safe access can exist, so this is intended for owner destructors and
+    /// other teardown paths which must not block on scheduler state.
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut T {
+        self.data.get_mut()
+    }
+
     fn current_owner_identity() -> (Option<Arc<TaskControlBlock>>, usize) {
         let task = current_task();
         let pid = task

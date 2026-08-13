@@ -62,6 +62,39 @@ const EXT4_READAHEAD_MIN_STREAK: usize = 2;
 const EXT4_HOT_PAGE_CACHE_PAGES: usize = EXT4_MMAP_READAHEAD_PAGES;
 const EXT4_WRITEBACK_BATCH_PAGES: usize = 8;
 
+/// Acquire an ext4 page-cache read lock without pinning a single CPU in the
+/// spin crate's default busy-wait loop. Writeback deliberately retains page
+/// write guards across block I/O, and that I/O may cooperatively schedule the
+/// owning continuation out. A waiter must therefore let that continuation run.
+fn lock_ext4_page_read(page: &RwLock<Page>) -> spin::RwLockReadGuard<'_, Page> {
+    loop {
+        if let Some(guard) = page.try_read() {
+            return guard;
+        }
+        if crate::task::processor::has_current_task_nolock() {
+            crate::task::suspend_current_kernel_continuation();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Write-side counterpart of [`lock_ext4_page_read`]. Resume the exact kernel
+/// continuation so a pending exec/exit cannot abandon any outer filesystem
+/// state while this page lock is contended.
+fn lock_ext4_page_write(page: &RwLock<Page>) -> spin::RwLockWriteGuard<'_, Page> {
+    loop {
+        if let Some(guard) = page.try_write() {
+            return guard;
+        }
+        if crate::task::processor::has_current_task_nolock() {
+            crate::task::suspend_current_kernel_continuation();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 static EXT4_FLUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
 static EXT4_FLUSH_PID: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_INODE: AtomicUsize = AtomicUsize::new(0);
@@ -1227,7 +1260,7 @@ impl Ext4File {
                     self.get_or_load_cache_page(ino, page_id, file_size)?;
                 should_flush_cache |= under_pressure && self.writable();
                 {
-                    let page_reader = target_page.read();
+                    let page_reader = lock_ext4_page_read(&target_page);
                     let frame = page_reader.resident_frame().ok_or(SysError::EIO)?;
                     let src_data =
                         &frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
@@ -1381,7 +1414,7 @@ impl Ext4File {
                     should_flush_cache |= under_pressure;
                     let mut page_modified = false;
                     let generation_changed = {
-                        let mut page_writer = target_page.write();
+                        let mut page_writer = lock_ext4_page_write(&target_page);
                         if inode.page_cache_generation() != write_generation {
                             // O_TRUNC completed while this writer was loading or
                             // allocating the page. Do not report these bytes as
@@ -1521,7 +1554,7 @@ impl Ext4File {
                 };
                 page.dirty
             } else {
-                page_lock.read().dirty
+                lock_ext4_page_read(&page_lock).dirty
             };
             if !dirty {
                 continue;
@@ -2026,7 +2059,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
         .then(|| PAGE_CACHE.get_page(cache_inode_id, new_size / PAGE_SIZE))
         .flatten();
     if let Some(page) = tail_page {
-        let mut page = page.write();
+        let mut page = lock_ext4_page_write(&page);
         let was_dirty = page.dirty;
         page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
         page.dirty = was_dirty;
@@ -2037,10 +2070,13 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
 
 impl Drop for Ext4File {
     fn drop(&mut self) {
-        with_lwext4_mount_read_lock_op(&self.mount_gate, Lwext4Op::OpenClose, || {
-            let mut ext4file = self.ext4file.lock();
-            let _ = ext4file.file_close();
-        });
+        // `ext4_fclose()` only invalidates this private descriptor; it neither
+        // accesses filesystem metadata nor performs I/O.  `Drop` owns the
+        // complete Ext4File, so no handle operation or BlockingMutex guard can
+        // still exist.  Closing through the mount gate here can deadlock the
+        // single-CPU idle reaper behind a writer whose continuation is ready
+        // but cannot run until the reaper returns to task selection.
+        let _ = self.ext4file.get_mut().file_close();
     }
 }
 
@@ -2284,10 +2320,16 @@ impl File for Ext4File {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         // info!("enter VFS Write-back Cache");
         let request_len = buf.len();
-        let (inode, write_guard, old_size, start_offset, reserved_end, size_reserved) = {
+        let inode = {
+            let inner = self.inner.lock();
+            inner.dentry.get_inode().unwrap()
+        };
+        // begin_page_cache_write() may yield while writeback owns the inode.
+        // Never wait for it while holding FileInner's non-sleepable spin mutex:
+        // writeback calls get_dentry(), which needs that same mutex.
+        let write_guard = Ext4PageCacheWriteGuard::new(inode.clone());
+        let (old_size, start_offset, reserved_end, size_reserved) = {
             let mut inner = self.inner.lock();
-            let inode = inner.dentry.get_inode().unwrap();
-            let write_guard = Ext4PageCacheWriteGuard::new(inode.clone());
             if inode.get_fs_flags()
                 & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
                 != 0
@@ -2308,14 +2350,7 @@ impl File for Ext4File {
                 inode.extend_size(reserved_end);
             }
             inner.offset = reserved_end;
-            (
-                inode,
-                write_guard,
-                old_size,
-                start_offset,
-                reserved_end,
-                size_reserved,
-            )
+            (old_size, start_offset, reserved_end, size_reserved)
         };
         let (total_write_size, should_flush_cache) =
             match self.write_cached_at(&inode, start_offset, old_size, &buf) {
@@ -2581,7 +2616,7 @@ impl File for Ext4File {
         if under_pressure && self.writable() {
             crate::fs::writeback::request_writeback();
         }
-        target_page.read().resident_frame()
+        lock_ext4_page_read(&target_page).resident_frame()
     }
 
     fn get_cached_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
@@ -2594,7 +2629,7 @@ impl File for Ext4File {
             .cache_inode_id()
             .unwrap_or_else(|| self.inode.get_ino());
         let page = self.get_cached_page_for_generation(ino, page_id, generation)?;
-        let frame = page.read().resident_frame();
+        let frame = lock_ext4_page_read(&page).resident_frame();
         (self.inode.page_cache_generation() == generation)
             .then_some(frame)
             .flatten()

@@ -81,6 +81,7 @@ pub struct Rlimit64 {
 }
 
 pub const RLIMIT_FSIZE: i32 = 1;
+pub const RLIMIT_STACK: i32 = 3;
 pub const RLIMIT_NOFILE: i32 = 7;
 pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
@@ -603,6 +604,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_interval_us: Option<u128>,
     /// 资源限制：文件大小上限
     pub rlimit_fsize: Rlimit64,
+    /// 用户栈资源限制。当前仅维护 Linux ABI 可见状态，不改变栈映射策略。
+    pub rlimit_stack: Rlimit64,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
     /// prctl(PR_SET_NO_NEW_PRIVS) state.
@@ -1524,6 +1527,10 @@ impl ProcessControlBlock {
                     rlim_cur: RLIM_INFINITY,
                     rlim_max: RLIM_INFINITY,
                 },
+                rlimit_stack: Rlimit64 {
+                    rlim_cur: MAX_STACK_SIZE as u64,
+                    rlim_max: MAX_STACK_SIZE as u64,
+                },
                 rlimit_nofile: Rlimit64 {
                     rlim_cur: 1024,
                     rlim_max: 1024,
@@ -2331,6 +2338,7 @@ impl ProcessControlBlock {
                 parent_blocked_signals_for_process,
                 parent_signal_handlers,
                 parent_rlimit_fsize,
+                parent_rlimit_stack,
                 parent_rlimit_nofile,
                 parent_no_new_privs,
                 parent_has_cap_sys_admin,
@@ -2419,6 +2427,7 @@ impl ProcessControlBlock {
                         handlers
                     },
                     parent.rlimit_fsize,
+                    parent.rlimit_stack,
                     parent.rlimit_nofile,
                     parent.no_new_privs,
                     parent.has_cap_sys_admin,
@@ -2502,6 +2511,7 @@ impl ProcessControlBlock {
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
                     rlimit_fsize: parent_rlimit_fsize,
+                    rlimit_stack: parent_rlimit_stack,
                     rlimit_nofile: parent_rlimit_nofile,
                     no_new_privs: parent_no_new_privs,
                     has_cap_sys_admin: parent_has_cap_sys_admin,
