@@ -64,9 +64,9 @@ const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
-    // "/musl/iperf_testcode.sh",
+    "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
-    // "/glibc/iperf_testcode.sh",
+    "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
     "/glibc/lmbench_testcode.sh",
 
