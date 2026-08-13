@@ -30,7 +30,6 @@
 ![整体架构](./docs/整体架构图.svg)
 ### 项目文档
 - [初赛文档](./Unicus初赛文档.pdf)
-- [初赛PPT](./Unicus初赛PPT.pptx)
 
 - [决赛演示视频](https://pan.baidu.com/s/1w4IjYoZliJ-LIrdoPlzNHQ?pwd=9r5t):提取码：9r5t
 - [决赛文档](./Unicus决赛文档.pdf)
