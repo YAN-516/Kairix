@@ -915,7 +915,8 @@ pub fn _init_virtio_pci() {
     // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）
     // let fdt_addr = get_fdt_addr();
     // let fdt_addr: u64 = 0x9000_0000_0010_0000;
-    let fdt_addr: u64 = 0x9000_0000_0ecc_f480;
+    // let fdt_addr: u64 = 0x9000_0000_0ecc_f480;
+    let fdt_addr: u64 = 0x9000_0000_0ecd_5dc0;
     let fdt = unsafe { Fdt::from_ptr(fdt_addr as *const u8).unwrap() };
 
     // 查找 PCI 节点

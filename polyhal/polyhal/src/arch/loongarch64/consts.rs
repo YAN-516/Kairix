@@ -26,7 +26,8 @@ pub const QEMU_DTB_ADDR: PhysAddr = PhysAddr(0x100000);
 pub const FDT_ADDR: u64 = 0x9000_0000_0010_0000;
 
 #[cfg(board = "2k1000")]
-pub const FDT_ADDR: u64 = 0x9000_0000_0ecc_f480;
+pub const FDT_ADDR: u64 = 0x9000_0000_0ecd_5dc0;
+// pub const FDT_ADDR: u64 = 0x9000_0000_0ecc_f480;
 
 pub const STACK_EXPAND_LIMIT: usize = PAGE_SIZE * 2;
 pub const MAX_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB 总上限
