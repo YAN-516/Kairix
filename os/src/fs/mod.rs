@@ -168,7 +168,8 @@ pub fn get_filesystem(name: &str) -> Arc<dyn FsType> {
 }
 
 #[cfg(target_arch = "loongarch64")]
-const LOONGARCH_FDT_VADDR: usize = 0x9000_0000_0ecd_5dc0;
+// const LOONGARCH_FDT_VADDR: usize = 0x9000_0000_0ecd_5dc0;
+const LOONGARCH_FDT_VADDR: usize = 0x9000_0000_0a00_0000;
 // const LOONGARCH_FDT_VADDR: usize = 0x9000_0000_0ecc_f480;
 #[cfg(target_arch = "loongarch64")]
 const INITRD_SCAN_END: usize = 0x9000_0000_9800_0000;
