@@ -91,6 +91,7 @@ const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_SENDMSG: usize = 211;
 const SYSCALL_RECVMSG: usize = 212;
+const SYSCALL_SENDMMSG: usize = 269;
 const SYSCALL_SSH_CONNECT: usize = 1110;
 const SYSCALL_SSH_WRITE: usize = 1111;
 const SYSCALL_SSH_READ: usize = 1112;
@@ -1008,6 +1009,10 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
 
 pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
     syscall(SYSCALL_RECVMSG, [fd, msg_ptr, flags as usize, 0, 0, 0])
+}
+
+pub fn sys_sendmmsg(fd: usize, msgvec: usize, vlen: usize, flags: i32) -> isize {
+    syscall(SYSCALL_SENDMMSG, [fd, msgvec, vlen, flags as usize, 0, 0])
 }
 
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
