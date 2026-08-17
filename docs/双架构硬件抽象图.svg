@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="850" viewBox="0 0 1400 850" role="img" aria-labelledby="title desc">
+  <title id="title">Kairix Multi-Architecture Hardware Abstraction</title>
+  <desc id="desc">Kairix 通过 PolyHAL 统一接口和 Rust 条件编译支持 RISC-V 与 LoongArch。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#24313f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .outer { fill: none; stroke: #d7dde5; stroke-width: 2; }
+      .frame { fill: #fbfcfe; stroke: #24313f; stroke-width: 2; }
+      .box { stroke: #24313f; stroke-width: 2; }
+      .subbox { stroke: #24313f; stroke-width: 1.4; }
+      .muted { fill: #f4f6f8; }
+      .proc { fill: #ffd7d7; }
+      .mem { fill: #ffe2b7; }
+      .fs { fill: #fff0a8; }
+      .net { fill: #dccdf8; }
+      .hal { fill: #e6f4ee; }
+      .select { fill: #eadfd9; }
+      .riscv { fill: #c9f2d0; }
+      .loong { fill: #e7ddf8; }
+      .hw { fill: #eef1f4; }
+      .accent { fill: #dceaf5; }
+      .arrow { stroke: #24313f; stroke-width: 1.9; fill: none; marker-end: url(#arrow); }
+      .title { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 27px; font-weight: 700; fill: #1f2937; }
+      .side { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 20px; font-weight: 700; fill: #374151; }
+      .cardTitle { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 22px; font-weight: 700; fill: #1f2937; }
+      .text { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 18px; fill: #1f2937; }
+      .small { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 16px; fill: #374151; }
+      .mono { font-family: "JetBrains Mono", Consolas, monospace; font-size: 16px; fill: #1f2937; }
+      .strong { font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect class="page" width="1400" height="850"/>
+  <rect class="outer" x="34" y="24" width="1332" height="802" rx="18"/>
+  <text x="700" y="61" text-anchor="middle" class="title">Kairix Multi-Architecture Hardware Abstraction</text>
+
+  <!-- Architecture-independent kernel -->
+  <text x="52" y="119" class="side">Kernel Core</text>
+  <rect class="frame" x="190" y="86" width="1150" height="112" rx="16"/>
+  <text x="765" y="116" text-anchor="middle" class="cardTitle">Kairix 架构无关内核代码</text>
+  <rect class="subbox proc" x="220" y="136" width="250" height="42" rx="8"/>
+  <rect class="subbox mem" x="500" y="136" width="250" height="42" rx="8"/>
+  <rect class="subbox fs" x="780" y="136" width="250" height="42" rx="8"/>
+  <rect class="subbox net" x="1060" y="136" width="250" height="42" rx="8"/>
+  <text x="345" y="163" text-anchor="middle" class="text strong">任务与系统调用</text>
+  <text x="625" y="163" text-anchor="middle" class="text strong">内存管理</text>
+  <text x="905" y="163" text-anchor="middle" class="text strong">文件系统</text>
+  <text x="1185" y="163" text-anchor="middle" class="text strong">网络与驱动</text>
+
+  <!-- PolyHAL API -->
+  <text x="52" y="260" class="side">Unified HAL</text>
+  <rect class="box hal" x="190" y="230" width="1150" height="148" rx="16"/>
+  <text x="765" y="264" text-anchor="middle" class="cardTitle">PolyHAL 统一硬件抽象接口</text>
+  <text x="765" y="290" text-anchor="middle" class="small">向上提供一致语义，屏蔽指令集与平台实现差异</text>
+
+  <g transform="translate(220 313)">
+    <rect class="subbox muted" width="190" height="42" rx="8"/>
+    <rect class="subbox muted" x="220" width="190" height="42" rx="8"/>
+    <rect class="subbox muted" x="440" width="190" height="42" rx="8"/>
+    <rect class="subbox muted" x="660" width="190" height="42" rx="8"/>
+    <rect class="subbox muted" x="880" width="200" height="42" rx="8"/>
+    <text x="95" y="27" text-anchor="middle" class="small strong">instruction · irq</text>
+    <text x="315" y="27" text-anchor="middle" class="small strong">timer · trap</text>
+    <text x="535" y="27" text-anchor="middle" class="small strong">kcontext</text>
+    <text x="755" y="27" text-anchor="middle" class="small strong">pagetable · mem</text>
+    <text x="980" y="27" text-anchor="middle" class="small strong">multicore · percpu</text>
+  </g>
+
+  <!-- Compile-time selector -->
+  <text x="52" y="433" class="side">Build Time</text>
+  <rect class="box select" x="315" y="408" width="900" height="84" rx="12"/>
+  <text x="765" y="438" text-anchor="middle" class="cardTitle">Rust 条件编译 · 根据目标架构自动选择后端</text>
+  <text x="470" y="470" text-anchor="middle" class="mono">target_arch = "riscv64"</text>
+  <text x="1060" y="470" text-anchor="middle" class="mono">target_arch = "loongarch64"</text>
+
+  <!-- Architecture backends -->
+  <text x="52" y="553" class="side">Arch Backend</text>
+  <rect class="frame" x="190" y="526" width="1150" height="160" rx="18"/>
+
+  <rect class="box riscv" x="220" y="552" width="500" height="108" rx="12"/>
+  <text x="470" y="585" text-anchor="middle" class="cardTitle">RISC-V Backend</text>
+  <text x="470" y="613" text-anchor="middle" class="mono">riscv64.rs</text>
+  <text x="470" y="640" text-anchor="middle" class="small">指令 · 异常中断 · 时钟 · 页表 · 上下文 · 多核</text>
+
+  <rect class="box loong" x="810" y="552" width="500" height="108" rx="12"/>
+  <text x="1060" y="585" text-anchor="middle" class="cardTitle">LoongArch Backend</text>
+  <text x="1060" y="613" text-anchor="middle" class="mono">loongarch64.rs</text>
+  <text x="1060" y="640" text-anchor="middle" class="small">指令 · 异常中断 · 时钟 · 页表 · 上下文 · 多核</text>
+
+  <!-- Hardware -->
+  <text x="52" y="740" class="side">Hardware</text>
+  <rect class="box hw" x="220" y="716" width="500" height="54" rx="10"/>
+  <rect class="box hw" x="810" y="716" width="500" height="54" rx="10"/>
+  <text x="470" y="750" text-anchor="middle" class="cardTitle">RISC-V ISA / Platform</text>
+  <text x="1060" y="750" text-anchor="middle" class="cardTitle">LoongArch ISA / Platform</text>
+
+  <rect class="box accent" x="315" y="788" width="900" height="26" rx="8"/>
+  <text x="765" y="807" text-anchor="middle" class="small strong">一次构建只编入目标架构实现 · 上层内核保持统一调用方式</text>
+
+  <!-- Arrows are drawn last so they remain visible above layer frames. -->
+  <path class="arrow" d="M765 198 L765 230"/>
+  <path class="arrow" d="M765 378 L765 408"/>
+  <path class="arrow" d="M470 492 L470 552"/>
+  <path class="arrow" d="M1060 492 L1060 552"/>
+  <path class="arrow" d="M470 660 L470 716"/>
+  <path class="arrow" d="M1060 660 L1060 716"/>
+</svg>

@@ -80,3 +80,16 @@ mprotect
 16G启动缓慢的问题
 
 time timeout 50m qemu-system-riscv64   -machine virt -kernel kernel-rv -m 8G -nographic -smp 8   -bios default   -drive file=sdcard-rv.img,if=none,format=raw,id=x0   -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0   -no-reboot   -device virtio-net-device,netdev=net   -netdev user,id=net   -rtc base=utc   2>&1 | tee "$log"
+
+
+
+是什么，创新点在哪，关键数据结构又是什么
+
+
+
+
+
+创新点：堆的per CPU slab
+多核调度？
+文件系统
+未来打算：文件系统实现多请求异步块IO

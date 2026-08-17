@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="800" viewBox="0 0 1400 800" role="img" aria-labelledby="title desc">
+  <title id="title">Kairix Kernel Heap Architecture</title>
+  <desc id="desc">Kairix 内核堆由 Per-CPU Slab、全局伙伴堆和受限动态扩展组成。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#24313f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowBoth" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#356b8c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .outer { fill: none; stroke: #d7dde5; stroke-width: 2; }
+      .frame { fill: #fbfcfe; stroke: #24313f; stroke-width: 2; }
+      .box { stroke: #24313f; stroke-width: 2; }
+      .subbox { stroke: #24313f; stroke-width: 1.4; }
+      .muted { fill: #f4f6f8; }
+      .entry { fill: #eadfd9; }
+      .slab { fill: #ffe2b7; }
+      .buddy { fill: #fff0a8; }
+      .growth { fill: #e6f4ee; }
+      .physical { fill: #c9f2d0; }
+      .reserve { fill: #eef1f4; }
+      .accent { fill: #e7ddf8; }
+      .arrow { stroke: #24313f; stroke-width: 1.9; fill: none; marker-end: url(#arrow); }
+      .exchange { stroke: #356b8c; stroke-width: 1.8; fill: none; marker-start: url(#arrowBoth); marker-end: url(#arrowBoth); }
+      .title { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 27px; font-weight: 700; fill: #1f2937; }
+      .side { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 20px; font-weight: 700; fill: #374151; }
+      .cardTitle { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 22px; font-weight: 700; fill: #1f2937; }
+      .text { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 18px; fill: #1f2937; }
+      .small { font-family: Arial, "Noto Sans SC", "Microsoft YaHei", sans-serif; font-size: 16px; fill: #374151; }
+      .strong { font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect class="page" width="1400" height="800"/>
+  <rect class="outer" x="34" y="24" width="1332" height="752" rx="18"/>
+  <text x="700" y="61" text-anchor="middle" class="title">Kairix Kernel Heap Architecture</text>
+
+  <!-- Entry -->
+  <text x="52" y="119" class="side">Allocation</text>
+  <text x="52" y="141" class="side">Entry</text>
+  <rect class="box muted" x="250" y="86" width="900" height="56" rx="10"/>
+  <text x="700" y="121" text-anchor="middle" class="cardTitle">内核动态内存分配请求 · GlobalAlloc</text>
+
+  <rect class="box entry" x="250" y="180" width="900" height="64" rx="10"/>
+  <text x="700" y="207" text-anchor="middle" class="cardTitle">按舍入尺寸与对齐分类</text>
+  <text x="455" y="231" text-anchor="middle" class="small strong">≤ 4 KiB</text>
+  <text x="945" y="231" text-anchor="middle" class="small strong">&gt; 4 KiB / 特殊对齐</text>
+
+  <!-- Heap core -->
+  <text x="52" y="319" class="side">Heap Core</text>
+  <rect class="frame" x="190" y="280" width="1150" height="304" rx="18"/>
+
+  <rect class="box slab" x="215" y="307" width="520" height="248" rx="12"/>
+  <text x="475" y="341" text-anchor="middle" class="cardTitle">Per-CPU Slab</text>
+  <text x="475" y="366" text-anchor="middle" class="small">小对象局部快路径</text>
+
+  <g transform="translate(245 390)">
+    <rect class="subbox muted" width="130" height="58" rx="8"/>
+    <rect class="subbox muted" x="145" width="130" height="58" rx="8"/>
+    <rect class="subbox muted" x="290" width="170" height="58" rx="8" stroke-dasharray="6 5"/>
+    <text x="65" y="26" text-anchor="middle" class="text strong">CPU 0</text>
+    <text x="210" y="26" text-anchor="middle" class="text strong">CPU 1</text>
+    <text x="375" y="26" text-anchor="middle" class="text strong">CPU 2 … N</text>
+    <text x="65" y="46" text-anchor="middle" class="small">Local Cache</text>
+    <text x="210" y="46" text-anchor="middle" class="small">Local Cache</text>
+    <text x="375" y="46" text-anchor="middle" class="small">Local Cache</text>
+  </g>
+
+  <rect class="subbox" x="245" y="472" width="460" height="56" rx="8" fill="#fff5e6"/>
+  <text x="475" y="495" text-anchor="middle" class="text strong">9 个尺寸类：16 B · 32 B · … · 4 KiB</text>
+  <text x="475" y="516" text-anchor="middle" class="small">64 KiB Span · 位图管理</text>
+
+  <rect class="box buddy" x="765" y="307" width="550" height="248" rx="12"/>
+  <text x="1040" y="341" text-anchor="middle" class="cardTitle">Global Buddy Heap</text>
+  <text x="1040" y="366" text-anchor="middle" class="small">共享后备层 · 2 的幂拆分与合并</text>
+
+  <rect class="subbox muted" x="800" y="394" width="215" height="78" rx="8"/>
+  <text x="907.5" y="423" text-anchor="middle" class="text strong">大对象分配</text>
+  <text x="907.5" y="448" text-anchor="middle" class="small">连续伙伴块</text>
+
+  <rect class="subbox muted" x="1030" y="394" width="250" height="78" rx="8"/>
+  <text x="1155" y="423" text-anchor="middle" class="text strong">Slab 后备</text>
+  <text x="1155" y="448" text-anchor="middle" class="small">补充 / 回收 64 KiB Span</text>
+
+  <rect class="subbox" x="800" y="492" width="480" height="36" rx="8" fill="#fff9d6"/>
+  <text x="1040" y="516" text-anchor="middle" class="small strong">全局锁保护 · 空闲块自动合并</text>
+
+  <!-- Growth layer -->
+  <text x="52" y="637" class="side">Heap Growth</text>
+  <rect class="frame" x="190" y="606" width="1150" height="104" rx="18"/>
+
+  <rect class="box growth" x="215" y="627" width="300" height="62" rx="10"/>
+  <text x="365" y="652" text-anchor="middle" class="cardTitle">Grow-on-Demand</text>
+  <text x="365" y="675" text-anchor="middle" class="small strong">单次至少 32 MiB</text>
+
+  <rect class="box physical" x="565" y="627" width="300" height="62" rx="10"/>
+  <text x="715" y="652" text-anchor="middle" class="cardTitle">Physical Frame Buddy</text>
+  <text x="715" y="675" text-anchor="middle" class="small">连续物理页 · 直接映射</text>
+
+  <rect class="box reserve" x="915" y="627" width="400" height="62" rx="10"/>
+  <text x="1115" y="652" text-anchor="middle" class="cardTitle">Bounded Growth</text>
+  <text x="1115" y="675" text-anchor="middle" class="small">增长上限 · 空闲页保留</text>
+
+  <rect class="box accent" x="250" y="730" width="900" height="29" rx="9"/>
+  <text x="700" y="750" text-anchor="middle" class="small strong">局部快路径降低锁竞争 · 全局后备保证通用分配 · 受限扩展保护用户内存</text>
+
+  <!-- Arrows are drawn last so they stay above containing frames. -->
+  <path class="arrow" d="M700 142 L700 180"/>
+  <path class="arrow" d="M455 244 L455 307"/>
+  <path class="arrow" d="M945 244 L945 307"/>
+  <path class="exchange" d="M722 500 L778 500"/>
+  <path class="arrow" d="M1040 555 L1040 606"/>
+  <path class="arrow" d="M515 658 L565 658"/>
+  <path class="arrow" d="M865 658 L915 658"/>
+</svg>
