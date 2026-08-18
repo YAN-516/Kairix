@@ -219,6 +219,10 @@ pub fn install_runtime_files() {
         }
     }
 
+    if let Err(err) = write_file("/.initproc-no-autotest", b"", 0o644) {
+        warn!("[embedded] failed to disable autotest: {:?}", err);
+    }
+
     if let Err(err) = write_file("/etc/resolv.conf", RESOLV_CONF, 0o644) {
         warn!("[embedded] failed to install /etc/resolv.conf: {:?}", err);
     }
