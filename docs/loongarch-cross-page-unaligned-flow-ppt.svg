@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">LoongArch 跨页非对齐访存处理流程（PPT 精简版）</title>
+  <desc id="desc">精简展示用户非对齐访问、字节模拟、内核嵌套缺页、exception fixup、共享虚拟内存修页与原指令重试。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L10,6 L1,11" fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+    <marker id="arrow-red" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L10,6 L1,11" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+    <style>
+      .page { fill: #f8fafc; }
+      .box { stroke: #334155; stroke-width: 2.2; rx: 14; }
+      .user { fill: #dcfce7; }
+      .trap { fill: #dbeafe; }
+      .nested { fill: #f3e8ff; }
+      .vm { fill: #ffedd5; }
+      .success { fill: #d1fae5; stroke: #059669; }
+      .error { fill: #fee2e2; stroke: #dc2626; }
+      .decision { fill: #fef3c7; stroke: #b45309; stroke-width: 2.2; }
+      .arrow { fill: none; stroke: #334155; stroke-width: 3; marker-end: url(#arrow); }
+      .arrow-red { fill: none; stroke: #dc2626; stroke-width: 2.7; marker-end: url(#arrow-red); }
+      .arrow-dash { fill: none; stroke: #475569; stroke-width: 2.7; stroke-dasharray: 9 7; marker-end: url(#arrow); }
+      .title { font: 700 36px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 18px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #64748b; }
+      .node-title { font: 700 22px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .text { font: 400 18px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #334155; }
+      .small { font: 400 16px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .label { font: 700 17px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #334155; }
+      .label-red { font: 700 17px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #b91c1c; }
+      .step { fill: #0f172a; }
+      .step-text { font: 700 15px Arial, sans-serif; fill: #fff; }
+      .summary { font: 700 20px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #1e3a8a; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1600" height="900" />
+  <text class="title" x="800" y="52" text-anchor="middle">LoongArch 跨页非对齐访存处理</text>
+  <text class="subtitle" x="800" y="82" text-anchor="middle">嵌套异常安全退出，缺页交回用户 VM，修页后重放原指令</text>
+
+  <!-- Top row -->
+  <rect class="box user" x="55" y="155" width="245" height="120" />
+  <circle class="step" cx="75" cy="175" r="15" />
+  <text class="step-text" x="75" y="180" text-anchor="middle">1</text>
+  <text class="node-title" x="177" y="193" text-anchor="middle">用户非对齐访问</text>
+  <text class="text" x="177" y="227" text-anchor="middle">例：ld.d @ 0x1ffd</text>
+  <text class="small" x="177" y="253" text-anchor="middle">跨越已映射页与懒分配页</text>
+
+  <rect class="box trap" x="350" y="155" width="260" height="120" />
+  <circle class="step" cx="370" cy="175" r="15" />
+  <text class="step-text" x="370" y="180" text-anchor="middle">2</text>
+  <text class="node-title" x="480" y="193" text-anchor="middle">AddressNotAligned</text>
+  <text class="text" x="480" y="227" text-anchor="middle">保存用户 TrapFrame</text>
+  <text class="small" x="480" y="253" text-anchor="middle">ERA 保留原指令地址</text>
+
+  <rect class="box trap" x="660" y="155" width="260" height="120" />
+  <circle class="step" cx="680" cy="175" r="15" />
+  <text class="step-text" x="680" y="180" text-anchor="middle">3</text>
+  <text class="node-title" x="790" y="193" text-anchor="middle">逐字节模拟</text>
+  <text class="text" x="790" y="227" text-anchor="middle">ld.d → 多次 ld.b</text>
+  <text class="small" x="790" y="253" text-anchor="middle">unaligned_read / write</text>
+
+  <path class="decision" d="M1080 145 L1225 215 L1080 285 L935 215 Z" />
+  <text class="node-title" x="1080" y="207" text-anchor="middle">跨页字节</text>
+  <text class="node-title" x="1080" y="234" text-anchor="middle">是否缺页？</text>
+
+  <rect class="box success" x="1280" y="155" width="260" height="120" />
+  <text class="node-title" x="1410" y="193" text-anchor="middle">模拟成功</text>
+  <text class="text" x="1410" y="227" text-anchor="middle">写回结果，ERA += 4</text>
+  <text class="small" x="1410" y="253" text-anchor="middle">继续下一条用户指令</text>
+
+  <path class="arrow" d="M300 215 H350" />
+  <path class="arrow" d="M610 215 H660" />
+  <path class="arrow" d="M920 215 H935" />
+  <path class="arrow" d="M1225 215 H1280" />
+  <text class="label" x="1250" y="200" text-anchor="middle">否</text>
+
+  <!-- Nested fault -->
+  <rect class="box nested" x="920" y="380" width="320" height="130" />
+  <circle class="step" cx="940" cy="400" r="15" />
+  <text class="step-text" x="940" y="405" text-anchor="middle">4</text>
+  <text class="node-title" x="1080" y="420" text-anchor="middle">内核态嵌套 PageFault</text>
+  <text class="text" x="1080" y="455" text-anchor="middle">__ex_table 命中 → 跳到 fixup</text>
+  <text class="small" x="1080" y="483" text-anchor="middle">BADV 更新为真正缺页字节</text>
+  <path class="arrow" d="M1080 285 V380" />
+  <text class="label" x="1098" y="333">是</text>
+
+  <rect class="box trap" x="550" y="380" width="320" height="130" />
+  <circle class="step" cx="570" cy="400" r="15" />
+  <text class="step-text" x="570" y="405" text-anchor="middle">5</text>
+  <text class="node-title" x="710" y="420" text-anchor="middle">模拟器收到 -1</text>
+  <text class="text" x="710" y="455" text-anchor="middle">转为 Load/StorePageFault</text>
+  <text class="small" x="710" y="483" text-anchor="middle">使用精确 BADV；用户 ERA 不变</text>
+  <path class="arrow" d="M920 445 H870" />
+
+  <rect class="box vm" x="180" y="380" width="320" height="130" />
+  <circle class="step" cx="200" cy="400" r="15" />
+  <text class="step-text" x="200" y="405" text-anchor="middle">6</text>
+  <text class="node-title" x="340" y="420" text-anchor="middle">共享 VM 修复用户页</text>
+  <text class="text" x="340" y="455" text-anchor="middle">懒分配 / COW / mmap</text>
+  <text class="small" x="340" y="483" text-anchor="middle">建 PTE，刷新 TLB</text>
+  <path class="arrow" d="M550 445 H500" />
+
+  <!-- Failure branch -->
+  <rect class="box error" x="55" y="565" width="250" height="92" />
+  <text class="node-title" x="180" y="600" text-anchor="middle">地址或权限非法</text>
+  <text class="text" x="180" y="632" text-anchor="middle">SIGSEGV / SIGBUS</text>
+  <path class="arrow-red" d="M250 510 V535 H180 V565" />
+  <text class="label-red" x="268" y="543">失败</text>
+
+  <!-- Retry -->
+  <rect class="box user" x="410" y="610" width="320" height="125" />
+  <circle class="step" cx="430" cy="630" r="15" />
+  <text class="step-text" x="430" y="635" text-anchor="middle">7</text>
+  <text class="node-title" x="570" y="650" text-anchor="middle">重试原用户指令</text>
+  <text class="text" x="570" y="685" text-anchor="middle">ERA 未推进，重新执行 ld.d/st.d</text>
+  <text class="small" x="570" y="713" text-anchor="middle">再次进入非对齐模拟</text>
+  <path class="arrow" d="M340 510 V550 H570 V610" />
+  <text class="label" x="360" y="539">成功</text>
+
+  <rect class="box success" x="870" y="610" width="320" height="125" />
+  <circle class="step" cx="890" cy="630" r="15" />
+  <text class="step-text" x="890" y="635" text-anchor="middle">8</text>
+  <text class="node-title" x="1030" y="650" text-anchor="middle">第二次模拟完成</text>
+  <text class="text" x="1030" y="685" text-anchor="middle">页面已就绪，完成全部字节访问</text>
+  <text class="small" x="1030" y="713" text-anchor="middle">写回结果，ERA += 4</text>
+  <path class="arrow" d="M730 672 H870" />
+
+  <path class="arrow-dash" d="M1190 672 H1410 V275" />
+  <text class="label" x="1300" y="656" text-anchor="middle">进入下一条指令</text>
+
+  <!-- Takeaway -->
+  <rect x="280" y="795" width="1040" height="66" rx="14" fill="#e0e7ff" stroke="#818cf8" stroke-width="1.8" />
+  <text class="summary" x="800" y="836" text-anchor="middle">核心：内层缺页只负责安全退出模拟器；外层用户 Trap 负责进入共享 VM，修页后重放原指令。</text>
+</svg>

@@ -496,6 +496,8 @@ run_user_task
 - LA `ESTAT.ECODE/ESUBCODE` 到公共 `TrapType` 的翻译。
 
 这些工作都留在 PolyHAL Trap 后端，上层缺页、信号和调度语义仍然共用。
+其中跨页非对齐访存与嵌套缺页的完整恢复机制见
+[LoongArch 跨页非对齐访存与缺页协同机制](./loongarch-unaligned-page-fault-design.md)。
 
 ## 8. SMP、CPU 标识与 IPI
 
