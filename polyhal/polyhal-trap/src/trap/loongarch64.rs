@@ -76,7 +76,10 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
             includes_trap_macros!(),
             r"
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
-                slli.d   $t1, $tp, 3
+                // LoongArch $tp is a thread-local pointer, not a CPU id. Read
+                // the architectural CPUID CSR when indexing per-CPU markers.
+                csrrd    $t1, 0x20
+                slli.d   $t1, $t1, 3
                 add.d    $t0, $t0, $t1
                 li.w     $t1, 170
                 st.d     $t1, $t0, 0
@@ -101,25 +104,25 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 csrwr    $a0, KSAVE_CTX   // SAVE user context addr to SAVEn(1)
 
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
-                slli.d   $t1, $tp, 3
+                csrrd    $t1, 0x20
+                slli.d   $t1, $t1, 3
                 add.d    $t0, $t0, $t1
                 li.w     $t1, 171
                 st.d     $t1, $t0, 0
 
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
-                slli.d   $t1, $tp, 3
+                csrrd    $t1, 0x20
+                slli.d   $t1, $t1, 3
                 add.d    $t0, $t0, $t1
                 li.w     $t1, 172
                 st.d     $t1, $t0, 0
 
                 LOAD_REGS
 
-                // LOAD_REGS has installed user tp and sp. Recover the kernel
-                // CPU id from the saved kernel context, publish the final
-                // pre-ertn boundary, and restore the user temporaries touched
-                // by this diagnostic sequence from KSAVE_CTX.
-                csrrd    $t2, KSAVE_KSP
-                ld.d     $t1, $t2, 1*8
+                // LOAD_REGS has installed user tp and sp. Read the CPU id from
+                // CPUID, publish the final pre-ertn boundary, and restore the
+                // user temporaries touched by this diagnostic sequence.
+                csrrd    $t1, 0x20
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
                 slli.d   $t1, $t1, 3
                 add.d    $t0, $t0, $t1

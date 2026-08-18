@@ -120,7 +120,9 @@ unsafe extern "C" fn _secondary_start() -> ! {
 #[cfg(not(board = "2k1000"))]
 const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0010_0000);
 #[cfg(board = "2k1000")]
-const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0ecc_f480);
+const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0ecd_5dc0);
+// const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0a00_0000);
+// const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0ecc_f480);
 
 const FALLBACK_MEM_START: usize = 0x8000_0000;
 const FALLBACK_MEM_END: usize = 0x1_0000_0000;

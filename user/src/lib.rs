@@ -957,6 +957,10 @@ pub fn recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
     sys_recvmsg(fd, msg_ptr, flags)
 }
 
+pub fn sendmmsg(fd: usize, msgvec: usize, vlen: usize, flags: i32) -> isize {
+    sys_sendmmsg(fd, msgvec, vlen, flags)
+}
+
 pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     sys_bind(fd, addr_ptr, addr_len)
 }

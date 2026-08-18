@@ -777,7 +777,16 @@ struct UserMsghdr {
     __pad2: i32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserMmsghdr {
+    msg_hdr: UserMsghdr,
+    msg_len: u32,
+    __pad: u32,
+}
+
 const MSG_IOV_MAX: usize = 1024;
+const MMSG_MAX: usize = 1024;
 
 fn read_user_bytes_flat(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<u8>> {
     if len == 0 {
@@ -900,13 +909,8 @@ fn copy_iovs_to_user(token: usize, iovs: &[UserIovec], data: &[u8]) -> SysResult
     Ok(())
 }
 
-/// sendmsg() system call.
-pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
-    if msg_ptr == 0 {
-        return Err(SysError::EFAULT);
-    }
+fn send_user_msghdr(fd: usize, msg: UserMsghdr, flags: i32) -> SyscallResult {
     let token = current_user_token();
-    let msg = *translated_ref(token, msg_ptr as *const UserMsghdr)?;
     let iovs = read_user_iovecs(token, msg.msg_iov, msg.msg_iovlen)?;
     let data = copy_iovs_from_user(token, &iovs)?;
     let explicit_dst = if msg.msg_name == 0 {
@@ -925,6 +929,56 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
         ))
     };
     sendto_kernel(fd, &data, flags, explicit_dst)
+}
+
+/// sendmsg() system call.
+pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
+    if msg_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let msg = *translated_ref(current_user_token(), msg_ptr as *const UserMsghdr)?;
+    send_user_msghdr(fd, msg, flags)
+}
+
+/// sendmmsg() system call.
+///
+/// glibc's resolver uses this syscall to send the A and AAAA queries as one
+/// batch. Linux returns the number of messages sent and stores each byte count
+/// in the corresponding `mmsghdr.msg_len`. If a later message fails, an
+/// already completed prefix is still reported as successful.
+pub fn sys_sendmmsg(fd: usize, msgvec: usize, vlen: usize, flags: i32) -> SyscallResult {
+    if vlen == 0 {
+        return Ok(0);
+    }
+    if msgvec == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let token = current_user_token();
+    let count = vlen.min(MMSG_MAX);
+    let stride = mem::size_of::<UserMmsghdr>();
+    let msg_len_offset = mem::size_of::<UserMsghdr>();
+    let mut sent_messages = 0usize;
+
+    for index in 0..count {
+        let offset = index.checked_mul(stride).ok_or(SysError::EINVAL)?;
+        let entry = msgvec.checked_add(offset).ok_or(SysError::EFAULT)?;
+        let mmsg = *translated_ref(token, entry as *const UserMmsghdr)?;
+
+        match send_user_msghdr(fd, mmsg.msg_hdr, flags) {
+            Ok(sent) => {
+                let sent = u32::try_from(sent).map_err(|_| SysError::EINVAL)?;
+                let msg_len_ptr =
+                    entry.checked_add(msg_len_offset).ok_or(SysError::EFAULT)? as *mut u32;
+                write_user_value(token, msg_len_ptr, &sent)?;
+                sent_messages += 1;
+            }
+            Err(err) if sent_messages == 0 => return Err(err),
+            Err(_) => break,
+        }
+    }
+
+    Ok(sent_messages)
 }
 
 /// recvmsg() system call.
